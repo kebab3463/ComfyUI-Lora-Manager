@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -29,9 +30,13 @@ from py.utils.models import BaseModelMetadata
 class RecordingWebSocketManager:
     def __init__(self) -> None:
         self.payloads: List[Dict[str, Any]] = []
+        self.broadcasts: List[Dict[str, Any]] = []
 
     async def broadcast_init_progress(self, payload: Dict[str, Any]) -> None:
         self.payloads.append(payload)
+
+    async def broadcast(self, payload: Dict[str, Any]) -> None:
+        self.broadcasts.append(payload)
 
 
 def _normalize_path(path: Path) -> str:
@@ -515,6 +520,74 @@ async def test_load_persisted_cache_populates_cache(tmp_path: Path, monkeypatch)
     assert scanner._tags_count == {'alpha': 1}
     assert ws_stub.payloads[-1]['stage'] == 'loading_cache'
     assert ws_stub.payloads[-1]['progress'] == 1
+
+
+@pytest.mark.asyncio
+async def test_load_persisted_cache_rebuilds_off_event_loop(tmp_path: Path, monkeypatch):
+    """The SQLite read and per-model rebuild must not run on the event loop."""
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    db_path = tmp_path / 'cache.sqlite'
+    store = PersistentModelCache(db_path=str(db_path))
+
+    file_path = tmp_path / 'one.txt'
+    file_path.write_text('one', encoding='utf-8')
+    normalized = _normalize_path(file_path)
+
+    raw_model = {
+        'file_path': normalized,
+        'file_name': 'one',
+        'model_name': 'one',
+        'folder': '',
+        'size': 3,
+        'modified': 123.0,
+        'sha256': 'hash-one',
+        'base_model': 'test',
+        'preview_url': '',
+        'preview_nsfw_level': 0,
+        'from_civitai': True,
+        'favorite': False,
+        'notes': '',
+        'usage_tips': '',
+        'exclude': False,
+        'db_checked': False,
+        'last_checked_at': 0.0,
+        'tags': ['alpha'],
+        'civitai': {'id': 11, 'modelId': 22, 'name': 'ver', 'trainedWords': ['abc']},
+    }
+
+    store.save_cache('dummy', [raw_model], {'hash-one': [normalized]}, [])
+
+    monkeypatch.setattr(model_scanner, 'get_persistent_cache', lambda: store)
+
+    scanner = DummyScanner(tmp_path)
+    ws_stub = RecordingWebSocketManager()
+    monkeypatch.setattr(model_scanner, 'ws_manager', ws_stub)
+
+    loop_thread = threading.get_ident()
+    worker_threads: List[int] = []
+
+    original_load_cache = store.load_cache
+    def tracking_load_cache(model_type):
+        worker_threads.append(threading.get_ident())
+        return original_load_cache(model_type)
+    monkeypatch.setattr(store, 'load_cache', tracking_load_cache)
+
+    original_adjust = scanner.adjust_cached_entry
+    def tracking_adjust(entry):
+        worker_threads.append(threading.get_ident())
+        return original_adjust(entry)
+    monkeypatch.setattr(scanner, 'adjust_cached_entry', tracking_adjust)
+
+    loaded = await scanner._load_persisted_cache('dummy')
+    assert loaded is True
+
+    # Both the SQLite read and the per-entry adjustment ran off the loop
+    assert len(worker_threads) == 2
+    assert all(tid != loop_thread for tid in worker_threads)
+
+    cache = await scanner.get_cached_data()
+    assert len(cache.raw_data) == 1
+    assert cache.raw_data[0]['file_path'] == normalized
 
 
 @pytest.mark.asyncio
@@ -1182,7 +1255,7 @@ async def test_bulk_delete_stages_two_files_into_single_batch(tmp_path: Path):
     assert result["total_deleted"] == 2
     assert result["cache_updated"] is True
 
-    # ONE batch id, no batch_ids array, and both files staged in its dir.
+    # ONE batch id, no batch_ids array - the merge succeeded.
     assert "batch_id" in result
     assert "batch_ids" not in result
     batch_id = result["batch_id"]
@@ -1190,15 +1263,28 @@ async def test_bulk_delete_stages_two_files_into_single_batch(tmp_path: Path):
     staging = root / PENDING_DELETE_DIR_NAME
     batch_dir = staging / batch_id
     assert batch_dir.is_dir()
-    assert (batch_dir / "one.txt").read_bytes() == b"one"
-    assert (batch_dir / "two.txt").read_bytes() == b"two"
+    manifest = json.loads((batch_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert sorted(os.path.basename(e["staged"]) for e in manifest["entries"]) == [
+        "one.txt",
+        "two.txt",
+    ]
 
-    # Loser batch dirs are removed by the merge - exactly one batch remains.
+    # Manifest-only merge: each staged file physically remains in its OWN
+    # batch dir (one.txt in the winner, two.txt in the loser storage dir) -
+    # no file was moved, so no cross-volume IO ever happens.
+    assert (batch_dir / "one.txt").read_bytes() == b"one"
     batch_dirs = [d.name for d in staging.iterdir() if d.is_dir()]
-    assert batch_dirs == [batch_id]
+    assert len(batch_dirs) == 2
+    assert batch_id in batch_dirs
+    staged_files = {
+        f.name
+        for bid in batch_dirs
+        for f in (staging / bid).iterdir()
+        if f.is_file() and f.name != "manifest.json"
+    }
+    assert staged_files == {"one.txt", "two.txt"}
 
     # The manifest carries the winner's cache snapshot for later undo.
-    manifest = json.loads((batch_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["model_snapshot"]["file_path"] == str(first)
 
     # Originals gone; cache entries removed.
@@ -1229,17 +1315,19 @@ async def test_bulk_delete_merged_manifest_reanchors_expiry(tmp_path: Path):
     # expires_at >= staging completion time + TTL (re-anchor assertion).
     assert manifest["expires_at"] >= after + PENDING_DELETE_TTL_SECONDS - 2
     assert manifest["expires_at"] >= before + PENDING_DELETE_TTL_SECONDS
-    # Both files are entries of the merged manifest.
+    # Both files are entries of the merged manifest; manifest-only merge means
+    # each staged file stays where staging put it (still on disk, in its own
+    # batch dir).
     assert len(manifest["entries"]) == 2
+    assert all(os.path.exists(entry["staged"]) for entry in manifest["entries"])
     assert (batch_dir / "one.txt").exists()
-    assert (batch_dir / "two.txt").exists()
 
 
 @pytest.mark.asyncio
 async def test_bulk_delete_merge_failure_falls_back_to_batch_ids(
     tmp_path: Path, monkeypatch
 ):
-    """Merge move failure -> batch_ids array of the intact constituent batches."""
+    """Merge unresolvable -> batch_ids array of the intact constituent batches."""
     root = tmp_path / "loras"
     root.mkdir()
     first = root / "one.txt"
@@ -1248,24 +1336,17 @@ async def test_bulk_delete_merge_failure_falls_back_to_batch_ids(
     second.write_text("two", encoding="utf-8")
     scanner = _make_bulk_scanner(root, [first, second])
 
-    real_rename = os.rename
-    fail_next = {"enabled": True}
+    # Simulate a merge that cannot resolve the winner batch (the only real
+    # merge failure mode since the merge no longer moves files): the caller
+    # must fall back to returning the constituent batch_ids array.
+    from py.services.pending_delete_service import get_pending_delete_service
 
-    def flaky_merge_rename(src: str, dst: str) -> None:
-        # Fail only when moving between batch dirs (merge), never during
-        # staging (src is then the original path, outside .lm-pending-delete).
-        if (
-            fail_next["enabled"]
-            and PENDING_DELETE_DIR_NAME in src
-            and PENDING_DELETE_DIR_NAME in dst
-        ):
-            fail_next["enabled"] = False
-            raise OSError("simulated merge failure")
-        return real_rename(src, dst)
+    service = await get_pending_delete_service()
 
-    monkeypatch.setattr(
-        "py.services.pending_delete_service.os.rename", flaky_merge_rename
-    )
+    async def _merge_unresolvable(_ids) -> None:
+        return None
+
+    monkeypatch.setattr(service, "merge_batches", _merge_unresolvable)
 
     result = await scanner.bulk_delete_models([str(first), str(second)])
 
@@ -1337,3 +1418,293 @@ async def test_bulk_delete_cancelled_after_one_staged_batch_present(
     assert not first.exists()
     # The second file was never touched.
     assert second.exists()
+
+
+@pytest.mark.asyncio
+async def test_get_all_folders_enumerates_empty_directories_live(tmp_path: Path):
+    _create_files(tmp_path)
+    (tmp_path / "empty").mkdir()
+    (tmp_path / "empty" / "nested_empty").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "visible" / ".hidden_child").mkdir(parents=True)
+    (tmp_path / PENDING_DELETE_DIR_NAME).mkdir()
+
+    scanner = DummyScanner(tmp_path)
+    await scanner._initialize_cache()
+    cache = await scanner.get_cached_data()
+
+    all_folders = await scanner.get_all_folders()
+
+    # cache.folders stays models-only
+    assert sorted(cache.folders) == ["", "nested"]
+
+    # Live enumeration includes empty directories and stays a superset
+    assert set(cache.folders) <= set(all_folders)
+    assert "empty" in all_folders
+    assert "empty/nested_empty" in all_folders
+    assert "visible" in all_folders
+
+    # Hidden directories (any segment starting with '.') are excluded
+    assert not any(
+        segment.startswith(".")
+        for folder in all_folders
+        for segment in folder.split("/")
+    )
+    # The pending-delete staging dir is excluded
+    assert PENDING_DELETE_DIR_NAME not in all_folders
+
+
+@pytest.mark.asyncio
+async def test_get_all_folders_uses_ttl_cache(tmp_path: Path, monkeypatch):
+    _create_files(tmp_path)
+    scanner = DummyScanner(tmp_path)
+    await scanner._initialize_cache()
+
+    walk_calls = {"n": 0}
+    real_walk = os.walk
+
+    def counting_walk(*args, **kwargs):
+        walk_calls["n"] += 1
+        return real_walk(*args, **kwargs)
+
+    monkeypatch.setattr(model_scanner.os, "walk", counting_walk)
+
+    first = await scanner.get_all_folders()
+    assert walk_calls["n"] == 1
+
+    # Second call within the TTL reuses the cached result without re-walking
+    second = await scanner.get_all_folders()
+    assert walk_calls["n"] == 1
+    assert second == first
+
+    # After the TTL expires the roots are walked again
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(
+        model_scanner.time,
+        "monotonic",
+        lambda: real_monotonic() + model_scanner.ALL_FOLDERS_CACHE_TTL_SECONDS + 1,
+    )
+    third = await scanner.get_all_folders()
+    assert walk_calls["n"] == 2
+    assert third == first
+
+
+@pytest.mark.asyncio
+async def test_get_all_folders_invalidated_after_move(tmp_path: Path):
+    first, _, _ = _create_files(tmp_path)
+    scanner = DummyScanner(tmp_path)
+
+    await scanner._initialize_cache()
+
+    cached = await scanner.get_all_folders()
+    assert scanner._all_folders_ttl_cache is not None
+    assert "new/deep" not in cached
+
+    # Simulate a move: target directories exist on disk (created by
+    # os.makedirs in move_model) and the cache entry is relocated.
+    (tmp_path / "new" / "deep").mkdir(parents=True)
+    original = _normalize_path(first)
+    new_path = _normalize_path(tmp_path / "new" / "deep" / "one.txt")
+    moved_metadata = {
+        "file_path": new_path,
+        "file_name": "one",
+        "model_name": "one",
+        "sha256": "hash-one",
+        "tags": ["alpha"],
+        "size": 1,
+        "modified": 1.0,
+    }
+
+    await scanner.update_single_model_cache(original, new_path, moved_metadata)
+
+    # The TTL cache was invalidated by the move
+    assert scanner._all_folders_ttl_cache is None
+
+    all_folders = await scanner.get_all_folders()
+    cache = await scanner.get_cached_data()
+    assert sorted(cache.folders) == ["nested", "new/deep"]
+    assert "new" in all_folders
+    assert "new/deep" in all_folders
+    assert set(cache.folders) <= set(all_folders)
+
+
+@pytest.mark.asyncio
+async def test_initialize_cache_broadcasts_scan_progress(tmp_path: Path, monkeypatch):
+    _create_files(tmp_path)
+    scanner = DummyScanner(tmp_path)
+
+    ws_stub = RecordingWebSocketManager()
+    monkeypatch.setattr(model_scanner, "ws_manager", ws_stub)
+
+    await scanner._initialize_cache()
+
+    messages = ws_stub.broadcasts
+    assert messages, "expected scan_progress broadcasts"
+
+    started = messages[0]
+    assert started["type"] == "scan_progress"
+    assert started["status"] == "started"
+    assert started["stage"] == "scan_folders"
+    assert started["progress"] == 0
+    assert started["model_type"] == "dummy"
+    assert started["pageType"] == "dummy"
+    assert started["full_rebuild"] is True
+
+    count_messages = [m for m in messages if m["stage"] == "count_models"]
+    assert count_messages and count_messages[0]["total"] == 3
+
+    process_messages = [
+        m for m in messages
+        if m["stage"] == "process_models" and m["status"] == "processing"
+    ]
+    assert process_messages, "expected at least one process_models update"
+    final_process = process_messages[-1]
+    assert final_process["processed"] == 3
+    assert final_process["total"] == 3
+    assert final_process["current_name"].endswith(".txt")
+    for message in process_messages:
+        assert 0 < message["progress"] <= 99
+
+    stages = [m["stage"] for m in messages]
+    assert "finalizing" in stages
+    completed = messages[-1]
+    assert completed["status"] == "completed"
+    assert completed["progress"] == 100
+    assert completed["elapsed_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_initialize_cache_broadcasts_cancelled(tmp_path: Path, monkeypatch):
+    _create_files(tmp_path)
+    scanner = DummyScanner(tmp_path)
+
+    ws_stub = RecordingWebSocketManager()
+    monkeypatch.setattr(model_scanner, "ws_manager", ws_stub)
+
+    original_process = DummyScanner._process_model_file
+
+    async def cancelling_process(self, file_path, root_path, **kwargs):
+        scanner.cancel_task()
+        return await original_process(self, file_path, root_path, **kwargs)
+
+    monkeypatch.setattr(DummyScanner, "_process_model_file", cancelling_process)
+
+    await scanner._initialize_cache()
+
+    messages = ws_stub.broadcasts
+    assert messages[0]["status"] == "started"
+    assert messages[-1]["status"] == "cancelled"
+    assert messages[-1]["elapsed_seconds"] >= 0
+    assert not any(m["status"] == "completed" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_initialize_cache_broadcasts_error(tmp_path: Path, monkeypatch):
+    scanner = DummyScanner(tmp_path)
+
+    ws_stub = RecordingWebSocketManager()
+    monkeypatch.setattr(model_scanner, "ws_manager", ws_stub)
+
+    async def raising_gather(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(scanner, "_gather_model_data", raising_gather)
+
+    await scanner._initialize_cache()
+
+    messages = ws_stub.broadcasts
+    assert messages[0]["status"] == "started"
+    assert messages[-1]["status"] == "error"
+    assert messages[-1]["error"] == "boom"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_cache_broadcasts_scan_progress(tmp_path: Path, monkeypatch):
+    _create_files(tmp_path)
+    scanner = DummyScanner(tmp_path)
+    await scanner._initialize_cache()
+
+    ws_stub = RecordingWebSocketManager()
+    monkeypatch.setattr(model_scanner, "ws_manager", ws_stub)
+
+    new_file = tmp_path / "three.txt"
+    new_file.write_text("three", encoding="utf-8")
+
+    await scanner._reconcile_cache()
+
+    messages = ws_stub.broadcasts
+    assert messages, "expected scan_progress broadcasts"
+
+    started = messages[0]
+    assert started["type"] == "scan_progress"
+    assert started["status"] == "started"
+    assert started["stage"] == "reconcile_scan"
+    assert started["progress"] == 0
+    assert started["full_rebuild"] is False
+
+    process_messages = [
+        m for m in messages
+        if m["stage"] == "process_new" and m["status"] == "processing"
+    ]
+    assert process_messages, "expected process_new progress updates"
+    assert process_messages[-1]["processed"] == 1
+    assert process_messages[-1]["total"] == 1
+    assert process_messages[-1]["current_name"] == "three.txt"
+
+    completed = messages[-1]
+    assert completed["status"] == "completed"
+    assert completed["progress"] == 100
+    assert completed["added"] == 1
+    assert completed["removed"] == 0
+    assert completed["elapsed_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_cache_broadcasts_cancelled(tmp_path: Path, monkeypatch):
+    _create_files(tmp_path)
+    scanner = DummyScanner(tmp_path)
+    await scanner._initialize_cache()
+
+    ws_stub = RecordingWebSocketManager()
+    monkeypatch.setattr(model_scanner, "ws_manager", ws_stub)
+
+    new_file = tmp_path / "four.txt"
+    new_file.write_text("four", encoding="utf-8")
+
+    original_process = DummyScanner._process_model_file
+
+    async def cancelling_process(self, file_path, root_path, **kwargs):
+        scanner.cancel_task()
+        return await original_process(self, file_path, root_path, **kwargs)
+
+    monkeypatch.setattr(DummyScanner, "_process_model_file", cancelling_process)
+
+    await scanner._reconcile_cache()
+
+    messages = ws_stub.broadcasts
+    assert messages[0]["status"] == "started"
+    assert messages[-1]["status"] == "cancelled"
+    assert messages[-1]["elapsed_seconds"] >= 0
+    assert not any(m["status"] == "completed" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_cache_broadcasts_error(tmp_path: Path, monkeypatch):
+    _create_files(tmp_path)
+    scanner = DummyScanner(tmp_path)
+    await scanner._initialize_cache()
+
+    ws_stub = RecordingWebSocketManager()
+    monkeypatch.setattr(model_scanner, "ws_manager", ws_stub)
+
+    def raising_walk(*_args, **_kwargs):
+        raise RuntimeError("walk failed")
+
+    monkeypatch.setattr(model_scanner.os, "walk", raising_walk)
+
+    await scanner._reconcile_cache()
+
+    messages = ws_stub.broadcasts
+    assert messages[0]["status"] == "started"
+    assert messages[-1]["status"] == "error"
+    assert messages[-1]["error"] == "walk failed"

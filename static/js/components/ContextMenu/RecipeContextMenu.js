@@ -37,8 +37,7 @@ export class RecipeContextMenu extends BaseContextMenu {
 
         if (recipeId && missingLorasItem) {
             // Check if this card has missing LoRAs
-            const loraCountElement = card.querySelector('.lora-count');
-            const hasMissingLoras = loraCountElement && loraCountElement.classList.contains('missing');
+            const hasMissingLoras = Boolean(card.querySelector('.lora-count.missing'));
 
             // Show/hide the download missing LoRAs option based on missing status
             if (hasMissingLoras) {
@@ -205,8 +204,9 @@ export class RecipeContextMenu extends BaseContextMenu {
             const response = await fetch(`/api/lm/recipe/${recipeId}`);
             const recipe = await response.json();
 
-            // Get missing LoRAs
-            const missingLoras = recipe.loras.filter(lora => !lora.inLibrary && !lora.isDeleted);
+            // Get missing LoRAs (still downloadable: not deleted from the
+            // source and hash still resolvable)
+            const missingLoras = recipe.loras.filter(lora => !lora.inLibrary && !lora.isDeleted && !lora.hashInvalid);
 
             if (missingLoras.length === 0) {
                 showToast('recipes.contextMenu.downloadMissing.noMissingLoras', {}, 'info');

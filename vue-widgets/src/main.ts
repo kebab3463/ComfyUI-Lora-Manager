@@ -45,6 +45,23 @@ import { app } from '../../../scripts/app.js'
 import { api } from '../../../scripts/api.js'
 // @ts-ignore
 import { getPoolConfigFromConnectedNode, getActiveLorasFromNode, updateConnectedTriggerWords, updateDownstreamLoaders } from '../../web/comfyui/utils.js'
+// @ts-ignore
+import { stripAutocompleteMetadataFromPromptResult } from '../../web/comfyui/autocomplete.js'
+
+// Strip the autocomplete lastAccepted boundary from exported workflows.
+// lastAccepted carries old prompt text (insertedText/textSnapshot) and is
+// session-only state; it must not leak into exported JSON (#1093).
+// graphToPrompt is shared by workflow export, Export API and queueing.
+// Local saves go through the change-tracker snapshot (no graphToPrompt) and
+// are intentionally left untouched so cross-session caret continuity is kept.
+// Post-processing the resolved result avoids any window/race with
+// change-tracker or copy/paste serialization of live state.
+const originalGraphToPrompt = app.graphToPrompt.bind(app)
+app.graphToPrompt = async (...args: unknown[]) => {
+  const result = await originalGraphToPrompt(...args)
+  stripAutocompleteMetadataFromPromptResult(result)
+  return result
+}
 
 function forwardMiddleMouseToCanvas(container: HTMLElement) {
   if (!container) return
@@ -84,9 +101,6 @@ export function createAutocompleteTextWidgetInstanceId() {
   autocompleteTextWidgetInstanceId += 1
   return autocompleteTextWidgetInstanceId
 }
-
-// Cache for dynamically loaded addLorasWidget module
-let addLorasWidgetCache: any = null
 
 // @ts-ignore
 function createLoraPoolWidget(node) {
@@ -875,91 +889,6 @@ app.registerExtension({
       // @ts-ignore
       CYCLER_CONFIG(node) {
         return createLoraCyclerWidget(node)
-      },
-      // @ts-ignore
-      async LORAS(node: any) {
-        if (!addLorasWidgetCache) {
-          // @ts-ignore
-          const module = await import(/* @vite-ignore */ '../loras_widget.js')
-          addLorasWidgetCache = module.addLorasWidget
-        }
-        // Check if this is a randomizer node to enable lock buttons
-        const isRandomizerNode = node.comfyClass === 'Lora Randomizer (LoraManager)'
-
-        // For randomizer nodes, add a callback to update connected trigger words
-        const callback = isRandomizerNode ? () => {
-          updateDownstreamLoaders(node)
-        } : null
-
-        const opts: { isRandomizerNode?: boolean; onSelectionChange?: (selection: any) => void } = {
-          isRandomizerNode,
-        }
-        if (isRandomizerNode) {
-          opts.onSelectionChange = async (selection: any) => {
-            if (!selection?.name || !selection?.active) return
-
-            // Walk outputs to find directly connected Lora Info nodes
-            const infoNodes: any[] = []
-            if (node.outputs) {
-              for (const output of node.outputs) {
-                if (!output?.links?.length) continue
-                for (const linkId of output.links) {
-                  const links = node.graph?.links
-                  if (!links) continue
-                  const link = Array.isArray(links) ? links[linkId] : links.get?.(linkId)
-                  if (!link) continue
-                  const targetNode = node.graph?.getNodeById?.(link.target_id)
-                  if (targetNode?.comfyClass === 'Lora Info (LoraManager)') {
-                    infoNodes.push(targetNode)
-                  }
-                }
-              }
-            }
-
-            if (infoNodes.length === 0) return
-
-            // Bump request token to guard against stale async responses
-            for (const infoNode of infoNodes) {
-              infoNode.__loraInfoReqId = (infoNode.__loraInfoReqId || 0) + 1
-            }
-            const reqIdSnapshot = new Map<any, number>()
-            for (const infoNode of infoNodes) {
-              reqIdSnapshot.set(infoNode, infoNode.__loraInfoReqId)
-            }
-
-            // Fetch notes via the real ComfyUI api
-            let infoData: any
-            try {
-              const response = await api.fetchApi(
-                `/lm/loras/get-notes?name=${encodeURIComponent(selection.name)}`,
-                { method: 'GET' }
-              )
-              if (response?.ok) {
-                const data = await response.json()
-                infoData = {
-                  name: selection.name,
-                  notes: data?.notes || '',
-                  filePath: data?.file_path || '',
-                }
-              } else {
-                infoData = { name: selection.name, notes: '[Error loading notes]', filePath: '' }
-              }
-            } catch {
-              infoData = { name: selection.name, notes: '[Error loading notes]', filePath: '' }
-            }
-
-            for (const infoNode of infoNodes) {
-              if (infoNode.__loraInfoReqId !== reqIdSnapshot.get(infoNode)) {
-                continue
-              }
-              if (typeof infoNode._setLoraInfo === 'function') {
-                infoNode._setLoraInfo(infoData)
-              }
-            }
-          }
-        }
-
-        return addLorasWidgetCache(node, 'loras', opts, callback)
       },
       // Autocomplete text widget for LoRAs (used by Lora Loader, Lora Stacker, WanVideo Lora Select)
       // @ts-ignore

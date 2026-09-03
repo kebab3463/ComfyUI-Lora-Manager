@@ -56,6 +56,7 @@ from ...utils.constants import (
 )
 from .hf_handlers import HfHandler
 from .agent_handlers import AgentHandler
+from .model_handlers import ModelCivitaiHandler
 from ...utils.civitai_utils import rewrite_preview_url
 from ...utils.example_images_paths import (
     find_non_compliant_items_in_example_images_root,
@@ -648,8 +649,59 @@ class NodeRegistry:
 
 
 class HealthCheckHandler:
+    def __init__(
+        self,
+        scanner_getters: Mapping[str, Callable[[], Awaitable[Any]]] | None = None,
+    ) -> None:
+        self._scanner_getters = scanner_getters or {
+            "lora": ServiceRegistry.get_lora_scanner,
+            "checkpoint": ServiceRegistry.get_checkpoint_scanner,
+            "embedding": ServiceRegistry.get_embedding_scanner,
+            "recipe": ServiceRegistry.get_recipe_scanner,
+        }
+
     async def health_check(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def get_init_status(self, request: web.Request) -> web.Response:
+        """Report aggregate scanner initialization status.
+
+        Used by the initialization page's polling fallback when the
+        /ws/init-progress WebSocket is unavailable. Omits pageType so every
+        page accepts the update and only reloads once all scanners are done.
+        """
+        pending: list[str] = []
+        for name, getter in self._scanner_getters.items():
+            try:
+                scanner = await getter()
+            except Exception:
+                pending.append(name)
+                continue
+            cache_ready = getattr(scanner, "_cache", None) is not None
+            is_initializing = getattr(scanner, "is_initializing", None)
+            busy = (
+                is_initializing()
+                if callable(is_initializing)
+                else bool(getattr(scanner, "_is_initializing", False))
+            )
+            if busy or not cache_ready:
+                pending.append(name)
+
+        if pending:
+            return web.json_response(
+                {
+                    "status": "initializing",
+                    "stage": "processing",
+                    "details": "Initializing: " + ", ".join(pending),
+                }
+            )
+        return web.json_response(
+            {
+                "status": "complete",
+                "progress": 100,
+                "details": "Initialization complete",
+            }
+        )
 
 
 class SupportersHandler:
@@ -2061,6 +2113,63 @@ class ModelLibraryHandler:
             enriched.append(entry)
         return enriched
 
+    @staticmethod
+    async def _get_downloaded_files(
+        scanner: Any, model_version_id: int
+    ) -> list[dict[str, Any]]:
+        """Return per-file downloaded state for a version in the library.
+
+        This handler has no CivitAI version payload, so the remote file list
+        is taken from the local entries' cached ``civitai`` metadata (the
+        full version payload persisted at download time, see
+        ``BaseModelMetadata.from_civitai_info``) and matched with the same
+        D2 rule used by ``get_civitai_versions`` (#1058). Local entries that
+        cannot be matched to a known remote file (e.g. missing metadata or
+        renamed files) are still reported with ``fileId`` set to None.
+        Returns ``[{fileId, fileName, filePath}]``.
+        """
+        try:
+            cache = await scanner.get_cached_data()
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.debug(
+                "Failed to read cache for downloaded files of version %s",
+                model_version_id,
+                exc_info=True,
+            )
+            return []
+
+        files_getter = getattr(cache, "get_files_by_version_id", None)
+        local_entries = files_getter(model_version_id) if files_getter else []
+        if not local_entries:
+            return []
+
+        version_payload: Mapping[str, Any] = {}
+        for entry in local_entries:
+            civitai = entry.get("civitai") if isinstance(entry, Mapping) else None
+            if isinstance(civitai, Mapping) and isinstance(civitai.get("files"), list):
+                version_payload = civitai
+                break
+
+        downloaded = ModelCivitaiHandler._match_downloaded_files(
+            version_payload, local_entries
+        )
+
+        # Surface local files that D2 could not map to a known remote file
+        matched_paths = {item.get("filePath") for item in downloaded}
+        for entry in local_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            if entry.get("file_path") in matched_paths:
+                continue
+            downloaded.append(
+                {
+                    "fileId": None,
+                    "fileName": entry.get("file_name"),
+                    "filePath": entry.get("file_path"),
+                }
+            )
+        return downloaded
+
     async def check_model_exists(self, request: web.Request) -> web.Response:
         try:
             model_id_str = request.query.get("modelId")
@@ -2096,9 +2205,11 @@ class ModelLibraryHandler:
 
                 exists = False
                 model_type = None
+                matched_scanner = None
                 if await lora_scanner.check_model_version_exists(model_version_id):
                     exists = True
                     model_type = "lora"
+                    matched_scanner = lora_scanner
                 elif (
                     checkpoint_scanner
                     and await checkpoint_scanner.check_model_version_exists(
@@ -2107,6 +2218,7 @@ class ModelLibraryHandler:
                 ):
                     exists = True
                     model_type = "checkpoint"
+                    matched_scanner = checkpoint_scanner
                 elif (
                     embedding_scanner
                     and await embedding_scanner.check_model_version_exists(
@@ -2115,6 +2227,7 @@ class ModelLibraryHandler:
                 ):
                     exists = True
                     model_type = "embedding"
+                    matched_scanner = embedding_scanner
 
                 if exists:
                     return web.json_response(
@@ -2123,6 +2236,9 @@ class ModelLibraryHandler:
                             "exists": True,
                             "modelType": model_type,
                             "hasBeenDownloaded": False,
+                            "downloadedFiles": await self._get_downloaded_files(
+                                matched_scanner, model_version_id
+                            ),
                         }
                     )
 
@@ -2144,6 +2260,7 @@ class ModelLibraryHandler:
                         "exists": False,
                         "modelType": history_type,
                         "hasBeenDownloaded": has_been_downloaded,
+                        "downloadedFiles": [],
                     }
                 )
 
@@ -2428,8 +2545,8 @@ class ModelLibraryHandler:
             embedding_scanner = await self._service_registry.get_embedding_scanner()
 
             found_type = None
-            file_path = None
             found_cache = None
+            entries: list = []
 
             for model_type, scanner in (
                 ("lora", lora_scanner),
@@ -2440,27 +2557,43 @@ class ModelLibraryHandler:
                 if cache and model_version_id in cache.version_index:
                     found_type = model_type
                     found_cache = cache
-                    entry = cache.version_index[model_version_id]
-                    file_path = entry.get("file_path")
+                    # A version can have several local files (#1058); collect
+                    # them all so the delete below covers every file.
+                    files_getter = getattr(cache, "get_files_by_version_id", None)
+                    if files_getter is not None:
+                        entries = files_getter(model_version_id)
+                    else:
+                        entries = [cache.version_index[model_version_id]]
                     break
 
-            if not file_path:
+            file_paths = [
+                entry.get("file_path")
+                for entry in entries
+                if isinstance(entry, dict) and entry.get("file_path")
+            ]
+
+            if not file_paths:
                 return web.json_response(
                     {"success": False, "error": "Model version not found in any scanner cache"},
                     status=404,
                 )
 
-            target_dir = os.path.dirname(file_path)
-            base_name = os.path.basename(file_path)
-            file_name, extension = os.path.splitext(base_name)
-            await delete_model_artifacts(target_dir, file_name, main_extension=extension)
+            for file_path in file_paths:
+                target_dir = os.path.dirname(file_path)
+                base_name = os.path.basename(file_path)
+                file_name, extension = os.path.splitext(base_name)
+                await delete_model_artifacts(target_dir, file_name, main_extension=extension)
 
             if found_cache:
+                removed_paths = set(file_paths)
                 found_cache.raw_data = [
                     item
                     for item in found_cache.raw_data
-                    if item.get("file_path") != file_path
+                    if item.get("file_path") not in removed_paths
                 ]
+                rebuild = getattr(found_cache, "rebuild_version_index", None)
+                if rebuild is not None:
+                    rebuild()
                 await found_cache.resort()
 
             scanner_map = {
@@ -2483,6 +2616,7 @@ class ModelLibraryHandler:
                     "success": True,
                     "modelType": found_type,
                     "modelVersionId": model_version_id,
+                    "deletedFiles": len(file_paths),
                 }
             )
         except Exception as exc:
@@ -3776,6 +3910,7 @@ class MiscHandlerSet:
     ) -> Mapping[str, Callable[[web.Request], Awaitable[web.StreamResponse]]]:
         return {
             "health_check": self.health.health_check,
+            "get_init_status": self.health.get_init_status,
             "get_settings": self.settings.get_settings,
             "update_settings": self.settings.update_settings,
             "get_doctor_diagnostics": self.doctor.get_doctor_diagnostics,

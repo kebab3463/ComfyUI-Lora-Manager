@@ -16,6 +16,7 @@ from py.routes.handlers.misc_handlers import (
     BackupHandler,
     DoctorHandler,
     FileSystemHandler,
+    HealthCheckHandler,
     LoraCodeHandler,
     ModelLibraryHandler,
     NodeRegistry,
@@ -908,6 +909,33 @@ class FakeExistenceScanner:
         return []
 
 
+class FakeVersionFilesCache:
+    """Cache stub exposing the multi-valued version->files index (#1058)."""
+
+    def __init__(self, entries):
+        self._entries = entries
+
+    def get_files_by_version_id(self, _version_id):
+        return list(self._entries)
+
+
+class FakeDownloadedFilesScanner:
+    """Scanner stub with one known version and per-file cache entries."""
+
+    def __init__(self, version_id, entries):
+        self._version_id = version_id
+        self._cache = FakeVersionFilesCache(entries)
+
+    async def check_model_version_exists(self, version_id):
+        return version_id == self._version_id
+
+    async def get_model_versions_by_id(self, _model_id):
+        return []
+
+    async def get_cached_data(self):
+        return self._cache
+
+
 class FakeMetadataProvider:
     async def get_model_versions(self, _model_id):
         return {"modelVersions": [], "name": "", "type": "lora"}
@@ -1524,7 +1552,123 @@ async def test_check_model_exists_returns_download_history_when_file_missing():
         "exists": False,
         "modelType": "checkpoint",
         "hasBeenDownloaded": True,
+        "downloadedFiles": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_check_model_exists_returns_downloaded_files():
+    """The version branch exposes per-file downloaded state (#1058)."""
+    civitai_payload = {
+        "id": 100,
+        "files": [
+            {
+                "id": 1001,
+                "name": "model-fp16.safetensors",
+                "hashes": {"SHA256": "A" * 64},
+            },
+            {
+                "id": 1002,
+                "name": "model-fp32.safetensors",
+                "hashes": {"SHA256": "B" * 64},
+            },
+        ],
+    }
+    entries = [
+        {
+            "file_name": "model-fp16",
+            "file_path": "/models/loras/model-fp16.safetensors",
+            "sha256": "a" * 64,
+            "civitai": civitai_payload,
+        },
+        {
+            # Legacy entry without a hash: matched by extension-less name (D2)
+            "file_name": "model-fp32",
+            "file_path": "/models/loras/model-fp32.safetensors",
+            "sha256": "",
+            "civitai": civitai_payload,
+        },
+    ]
+    lora_scanner = FakeDownloadedFilesScanner(100, entries)
+
+    async def lora_factory():
+        return lora_scanner
+
+    handler = ModelLibraryHandler(
+        ServiceRegistryAdapter(
+            get_lora_scanner=lora_factory,
+            get_checkpoint_scanner=fake_scanner_factory,
+            get_embedding_scanner=fake_scanner_factory,
+            get_downloaded_version_history_service=fake_download_history_service_factory,
+        ),
+        metadata_provider_factory=fake_metadata_provider_factory,
+    )
+
+    response = await handler.check_model_exists(
+        FakeRequest(query={"modelId": "5", "modelVersionId": "100"})  # pyright: ignore[reportArgumentType]
+    )
+    payload = _json_payload(response)
+
+    assert payload == {
+        "success": True,
+        "exists": True,
+        "modelType": "lora",
+        "hasBeenDownloaded": False,
+        "downloadedFiles": [
+            {
+                "fileId": 1001,
+                "fileName": "model-fp16.safetensors",
+                "filePath": "/models/loras/model-fp16.safetensors",
+            },
+            {
+                "fileId": 1002,
+                "fileName": "model-fp32.safetensors",
+                "filePath": "/models/loras/model-fp32.safetensors",
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_check_model_exists_downloaded_files_without_remote_metadata():
+    """Unmatchable local files are still reported with fileId None (#1058)."""
+    entries = [
+        {
+            "file_name": "renamed-model",
+            "file_path": "/models/loras/renamed-model.safetensors",
+            "sha256": "c" * 64,
+            "civitai": {"id": 100},  # no remote files list cached
+        },
+    ]
+    lora_scanner = FakeDownloadedFilesScanner(100, entries)
+
+    async def lora_factory():
+        return lora_scanner
+
+    handler = ModelLibraryHandler(
+        ServiceRegistryAdapter(
+            get_lora_scanner=lora_factory,
+            get_checkpoint_scanner=fake_scanner_factory,
+            get_embedding_scanner=fake_scanner_factory,
+            get_downloaded_version_history_service=fake_download_history_service_factory,
+        ),
+        metadata_provider_factory=fake_metadata_provider_factory,
+    )
+
+    response = await handler.check_model_exists(
+        FakeRequest(query={"modelId": "5", "modelVersionId": "100"})  # pyright: ignore[reportArgumentType]
+    )
+    payload = _json_payload(response)
+
+    assert payload["success"] is True
+    assert payload["exists"] is True
+    assert payload["downloadedFiles"] == [
+        {
+            "fileId": None,
+            "fileName": "renamed-model",
+            "filePath": "/models/loras/renamed-model.safetensors",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1867,3 +2011,54 @@ async def test_resolve_filename_conflicts_handles_scanner_error_gracefully():
 
     assert payload["success"] is True
     assert payload["count"] == 0
+
+
+async def test_get_init_status_reports_complete_when_all_scanners_ready():
+    async def ready_scanner():
+        return SimpleNamespace(_cache=object(), is_initializing=lambda: False)
+
+    handler = HealthCheckHandler(
+        scanner_getters={
+            "lora": ready_scanner,
+            "recipe": ready_scanner,
+        }
+    )
+
+    response = await handler.get_init_status(FakeRequest(method="GET"))  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert payload["status"] == "complete"
+    assert payload["progress"] == 100
+    assert "pageType" not in payload
+
+
+async def test_get_init_status_reports_pending_scanners():
+    async def ready_scanner():
+        return SimpleNamespace(_cache=object(), is_initializing=lambda: False)
+
+    async def initializing_scanner():
+        return SimpleNamespace(_cache=object(), is_initializing=lambda: True)
+
+    async def no_cache_scanner():
+        return SimpleNamespace(_cache=None, is_initializing=lambda: False)
+
+    async def failing_scanner():
+        raise RuntimeError("scanner unavailable")
+
+    handler = HealthCheckHandler(
+        scanner_getters={
+            "lora": ready_scanner,
+            "checkpoint": initializing_scanner,
+            "embedding": no_cache_scanner,
+            "recipe": failing_scanner,
+        }
+    )
+
+    response = await handler.get_init_status(FakeRequest(method="GET"))  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert payload["status"] == "initializing"
+    assert "checkpoint" in payload["details"]
+    assert "embedding" in payload["details"]
+    assert "recipe" in payload["details"]
+    assert "lora" not in payload["details"]

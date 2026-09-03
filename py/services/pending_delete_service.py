@@ -274,17 +274,21 @@ class PendingDeleteService:
     async def merge_batches(self, batch_ids: Sequence[str]) -> Optional[str]:
         """Merge several batches into the first batch's manifest.
 
-        Winner is ``batch_ids[0]``. The staged files of losing batches are
-        MOVED (os.rename) into the winner's batch dir and their ``staged``
-        paths rewritten in the merged manifest BEFORE any loser dir is
-        removed. ``expires_at`` is re-anchored to ``now + TTL`` at merge time
-        and a FRESH purge timer is armed for the winner.
+        Winner is ``batch_ids[0]``. Merging is MANIFEST-ONLY: staged files
+        are NEVER moved, so the merge is a pure metadata operation with zero
+        data IO and is inherently cross-volume safe (no EXDEV, no rollback).
+        Every loser's entries are appended to the winner's manifest with
+        their ``staged`` paths unchanged (files keep living in the loser's
+        own batch dir - the sibling-of-model staging location), each loser
+        dir is recorded in the winner manifest's ``merged_sources``, and each
+        loser manifest is stamped ``merged_into`` so its own purge timer, a
+        post-restart sweep or a direct undo call no-op. ``expires_at`` is
+        re-anchored to ``now + TTL`` at merge time and a FRESH purge timer is
+        armed for the winner.
 
-        On any move failure every already-moved file is moved BACK and the
-        original batch dirs/manifests are left intact; ``None`` is returned so
-        callers fall back to the ``batch_ids`` array contract. Cross-volume
-        merges hit EXDEV here - expected and fine (the fallback is the normal
-        path for those bulks).
+        Returns the winner id, or ``None`` when the winner batch cannot be
+        resolved (callers then fall back to the ``batch_ids`` array
+        contract).
         """
         if not batch_ids:
             return None
@@ -298,77 +302,68 @@ class PendingDeleteService:
             if winner_manifest is None:
                 return None
 
-            # Track (entry, original_staged_path, loser_dir) for rollback.
-            moved: List[Tuple[Dict[str, Any], str, str]] = []
-            processed_losers: List[Tuple[str, str]] = []  # (loser_id, loser_dir)
-
-            try:
-                for loser_id in batch_ids[1:]:
-                    loser_dir = await self._find_batch_dir(loser_id)
-                    if not loser_dir or os.path.normpath(loser_dir) == os.path.normpath(
-                        winner_dir
-                    ):
+            # Build the merged manifest in memory: loser entries are appended
+            # with their staged paths UNCHANGED - no file moves, no IO, no
+            # EXDEV. Loser dirs remain as physical storage until the merged
+            # batch is undone or purged.
+            merged_sources: List[str] = []
+            seen_loser_dirs: Set[str] = set()
+            for loser_id in batch_ids[1:]:
+                loser_dir = await self._find_batch_dir(loser_id)
+                if not loser_dir or os.path.normpath(loser_dir) == os.path.normpath(
+                    winner_dir
+                ):
+                    continue
+                loser_abs = os.path.abspath(loser_dir)
+                if loser_abs in seen_loser_dirs:
+                    continue
+                seen_loser_dirs.add(loser_abs)
+                loser_manifest = self._read_manifest(loser_dir)
+                if loser_manifest is None:
+                    # Corrupted loser: leave it for the sweep to quarantine.
+                    continue
+                for entry in loser_manifest.get("entries") or []:
+                    if entry.get("restored"):
                         continue
-                    loser_manifest = self._read_manifest(loser_dir)
-                    if loser_manifest is None:
-                        # Corrupted loser: leave it for the sweep to quarantine.
+                    staged_path = entry.get("staged")
+                    if not staged_path or not os.path.exists(staged_path):
                         continue
-                    for entry in loser_manifest.get("entries") or []:
-                        if entry.get("restored"):
-                            continue
-                        staged_path = entry.get("staged")
-                        if not staged_path or not os.path.exists(staged_path):
-                            continue
-                        new_staged = os.path.join(
-                            winner_dir, os.path.basename(staged_path)
-                        )
-                        if os.path.exists(new_staged):
-                            # os.rename would silently overwrite the existing
-                            # staged file on POSIX - never drop a staged file.
-                            # Abort the merge so callers fall back to the
-                            # batch_ids array contract.
-                            raise OSError(
-                                f"Merge collision: {os.path.basename(staged_path)} "
-                                "already staged in winner batch"
-                            )
-                        os.rename(staged_path, new_staged)
-                        original_staged = entry["staged"]
-                        entry["staged"] = os.path.abspath(new_staged)
-                        winner_manifest["entries"].append(entry)
-                        moved.append((entry, original_staged, loser_dir))
-                    processed_losers.append((loser_id, loser_dir))
-            except OSError as exc:
-                logger.warning(
-                    "Merge of %s failed after moving files: %s; rolling back",
-                    list(batch_ids),
-                    exc,
-                )
-                self._rollback_merge_moves(moved)
-                return None
+                    winner_manifest["entries"].append(entry)
+                merged_sources.append(loser_abs)
 
-            # Re-anchor expiry and persist the merged manifest atomically.
+            # Re-anchor expiry and persist the merged manifest atomically - it
+            # becomes the ONLY source of truth for every merged file, wherever
+            # it physically lives.
             winner_manifest["expires_at"] = (
                 int(time.time()) + PENDING_DELETE_TTL_SECONDS
             )
+            if merged_sources:
+                winner_manifest["merged_sources"] = merged_sources
             try:
                 self._write_manifest_atomic(winner_dir, winner_manifest)
             except OSError as exc:
                 logger.warning(
-                    "Failed to write merged manifest for %s: %s; rolling back",
+                    "Failed to write merged manifest for %s: %s",
                     winner_id,
                     exc,
                 )
-                self._rollback_merge_moves(moved)
                 return None
 
-            # All moves committed: remove loser dirs (must be empty by now)
-            # and drop them from the registry. Skipped losers (missing /
-            # corrupted / same-dir) stay registered so the sweep still
-            # quarantines them, exactly as before the registry existed.
-            for loser_id, loser_dir in processed_losers:
-                self._remove_manifest(loser_dir)
-                self._remove_empty_dir(loser_dir)
-                await self._forget_batch(loser_id)
+            # Stamp each loser manifest so its own purge timer / a later sweep
+            # / a direct undo call no-op: the winner owns those files from
+            # here on. Best-effort coordination; a failed stamp only risks the
+            # loser being swept at its own (earlier) expiry after a restart.
+            for loser_dir in merged_sources:
+                try:
+                    self._mark_merged(loser_dir, winner_id)
+                except OSError as exc:  # pragma: no cover - best-effort
+                    logger.warning(
+                        "Failed to mark merged loser %s: %s", loser_dir, exc
+                    )
+
+            # Losers are no longer independently managed.
+            for loser_dir in merged_sources:
+                await self._forget_batch(os.path.basename(loser_dir))
             await self._remember_batch(winner_id, winner_dir)
 
             # Arm a fresh purge timer for the winner with the re-anchored
@@ -396,6 +391,16 @@ class PendingDeleteService:
             manifest = self._read_manifest(batch_dir)
             if manifest is None:
                 raise ValueError(f"Manifest missing for batch {batch_id}")
+
+            merged_into = manifest.get("merged_into")
+            if merged_into:
+                # The batch was merged into another batch: its staged files
+                # are owned by the winner's manifest. Undo via the winner so
+                # the whole merged batch stays consistent.
+                raise ValueError(
+                    f"Batch {batch_id} was merged into batch {merged_into}; "
+                    "undo that batch instead"
+                )
 
             if manifest.get("state") == "restored":
                 return self._undo_result(manifest)
@@ -448,6 +453,10 @@ class PendingDeleteService:
             self._remove_manifest(batch_dir)
             self._remove_empty_dir(batch_dir)
             await self._forget_batch(batch_id)
+            # Clean up merged loser dirs (their staged files were restored
+            # above) and drop them from the registry too.
+            for loser_id in self._remove_merged_batch_dirs(manifest):
+                await self._forget_batch(loser_id)
 
             logger.info("Restored pending-delete batch %s", batch_id)
             return self._undo_result(manifest)
@@ -500,10 +509,36 @@ class PendingDeleteService:
         QUARANTINE them (preserving the pre-registry sweep semantics). The
         walk only descends into dirs literally named ``.lm-pending-delete``,
         so false positives are structurally limited.
+
+        The filesystem walk itself runs in a worker thread so a large or slow
+        library cannot block the event loop at startup; only the (rare) batch
+        registration awaits run on the loop.
+        """
+        roots = await self._get_all_model_roots()
+        loop = asyncio.get_event_loop()
+        staging_parents = await loop.run_in_executor(
+            None,  # Use default thread pool
+            self._collect_staging_parents,  # Run the tree walk off the loop
+            roots,
+        )
+        for staging_parent in staging_parents:
+            await self._register_batch_candidates(staging_parent)
+
+    def _collect_staging_parents(self, roots: Sequence[str]) -> List[str]:
+        """Walk every model root and return its staging-parent dirs.
+
+        Pure synchronous filesystem discovery with no awaits: walks with
+        ``followlinks=True, topdown=True``, prunes symlink cycles via a
+        per-root ``visited`` realpath set (realpath is used ONLY for this
+        dedup set - the returned paths are the unresolved business paths),
+        filters out :func:`_is_excluded_dir` dirs, and collects every dir
+        named ``.lm-pending-delete`` (including the case where a model root
+        itself is one). Results are returned in walk order.
         """
         from .model_scanner import _is_excluded_dir
 
-        for root in await self._get_all_model_roots():
+        staging_parents: List[str] = []
+        for root in roots:
             if not os.path.isdir(root):
                 continue
             visited: Set[str] = set()
@@ -518,21 +553,20 @@ class PendingDeleteService:
                 visited.add(real_dir)
                 if os.path.basename(dirpath) == PENDING_DELETE_DIR_NAME:
                     # The current dir IS a staging parent (reachable only when
-                    # a model root itself is one): register its batches.
-                    await self._register_batch_candidates(dirpath)
+                    # a model root itself is one): collect its batches.
+                    staging_parents.append(dirpath)
                     dirnames[:] = []
                     continue
                 next_dirs: List[str] = []
                 for name in dirnames:
                     if name == PENDING_DELETE_DIR_NAME:
-                        await self._register_batch_candidates(
-                            os.path.join(dirpath, name)
-                        )
+                        staging_parents.append(os.path.join(dirpath, name))
                     elif _is_excluded_dir(name):
                         continue
                     else:
                         next_dirs.append(name)
                 dirnames[:] = next_dirs
+        return staging_parents
 
     async def _register_batch_candidates(self, staging_parent: str) -> None:
         """Register every non-orphaned batch subdir of a staging parent."""
@@ -754,25 +788,35 @@ class PendingDeleteService:
                     "Failed to remove staged copy %s: %s", staged_path, exc
                 )
 
-    def _rollback_merge_moves(
-        self, moved: Sequence[Tuple[Dict[str, Any], str, str]]
-    ) -> None:
-        """Move already-merged files back to their original loser batch dirs."""
-        for _entry, original_staged, _loser_dir in reversed(list(moved)):
-            current = _entry.get("staged")
-            if not current or not original_staged:
+    def _mark_merged(self, loser_dir: str, winner_id: str) -> None:
+        """Stamp ``merged_into`` on a loser manifest (best-effort).
+
+        The stamp makes the loser's own purge timer, post-restart sweeps and
+        direct undo calls no-op, so the winner's merged batch stays the only
+        owner of the loser's staged files until it is undone or purged.
+        """
+        loser_manifest = self._read_manifest(loser_dir)
+        if loser_manifest is None:
+            return
+        loser_manifest["merged_into"] = winner_id
+        self._write_manifest_atomic(loser_dir, loser_manifest)
+
+    def _remove_merged_batch_dirs(self, manifest: Dict[str, Any]) -> List[str]:
+        """Remove merged loser batch dirs once their files were handled.
+
+        Called after a merged batch has been fully undone or purged: each
+        loser manifest (stamped ``merged_into``) and its now-empty dir are
+        removed so the sweep never quarantines an orphaned staging dir.
+        Best-effort - returns the removed batch ids for registry cleanup.
+        """
+        removed: List[str] = []
+        for src in manifest.get("merged_sources") or []:
+            if not isinstance(src, str) or not src:
                 continue
-            if not os.path.exists(current):
-                continue
-            try:
-                os.rename(current, original_staged)
-            except OSError as exc:  # pragma: no cover - best-effort rollback
-                logger.warning(
-                    "Failed to roll back merge move %s -> %s: %s",
-                    current,
-                    original_staged,
-                    exc,
-                )
+            self._remove_manifest(src)
+            self._remove_empty_dir(src)
+            removed.append(os.path.basename(src))
+        return removed
 
     def _purge_batch_dir(self, batch_dir: str) -> bool:
         """Purge one batch dir. Returns True when the batch was purged/removed."""
@@ -785,6 +829,13 @@ class PendingDeleteService:
             # staged files (they may be the only copy of the user's data).
             self._quarantine_batch_dir(batch_dir)
             return True
+
+        if manifest.get("merged_into"):
+            # Merged into another batch: the winner owns these staged files.
+            # The loser's own purge timer / post-restart sweep must not remove
+            # them early (the winner re-anchored the merged expiry to give the
+            # whole bulk one undo window).
+            return False
 
         if manifest.get("state") == "restored":
             return False
@@ -817,6 +868,7 @@ class PendingDeleteService:
 
         self._remove_manifest(batch_dir)
         self._remove_empty_dir(batch_dir)
+        self._remove_merged_batch_dirs(manifest)
         return True
 
     def _quarantine_batch_dir(self, batch_dir: str) -> str:

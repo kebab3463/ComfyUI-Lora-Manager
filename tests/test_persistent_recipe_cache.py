@@ -120,6 +120,76 @@ class TestPersistentRecipeCache:
         loaded = cache.load_cache()
         assert loaded is None
 
+    def test_import_info_roundtrip(self, temp_db_path, sample_recipes):
+        """import_info (import provenance + no-LoRA reason) survives the cache."""
+        cache = PersistentRecipeCache(db_path=temp_db_path)
+
+        sample_recipes[0]["import_info"] = {
+            "channel": "batch_import_url",
+            "reason": "api_meta_no_lora_resources",
+            "details": {"api_meta_keys": ["prompt"], "api_model_version_ids": 0},
+        }
+        cache.save_cache(sample_recipes)
+
+        loaded = cache.load_cache()
+        assert loaded is not None
+        r1 = next(r for r in loaded.raw_data if r["id"] == "recipe-001")
+        assert r1["import_info"]["channel"] == "batch_import_url"
+        assert r1["import_info"]["reason"] == "api_meta_no_lora_resources"
+        assert r1["import_info"]["details"]["api_meta_keys"] == ["prompt"]
+
+        # Recipes without import_info simply omit the key.
+        r2 = next(r for r in loaded.raw_data if r["id"] == "recipe-002")
+        assert "import_info" not in r2
+
+    def test_import_info_column_migration(self, temp_db_path, sample_recipes):
+        """Existing databases gain the import_info_json column via ALTER TABLE."""
+        import sqlite3
+
+        # Simulate a legacy database without the new column.
+        conn = sqlite3.connect(temp_db_path)
+        conn.executescript(
+            """
+            CREATE TABLE recipes (
+                recipe_id TEXT PRIMARY KEY,
+                file_path TEXT,
+                json_path TEXT,
+                title TEXT,
+                folder TEXT,
+                source_path TEXT,
+                base_model TEXT,
+                fingerprint TEXT,
+                created_date REAL,
+                modified REAL,
+                file_mtime REAL,
+                file_size INTEGER,
+                favorite INTEGER DEFAULT 0,
+                repair_version INTEGER DEFAULT 0,
+                preview_nsfw_level INTEGER DEFAULT 0,
+                loras_json TEXT,
+                checkpoint_json TEXT,
+                gen_params_json TEXT,
+                tags_json TEXT,
+                has_workflow INTEGER DEFAULT 0
+            );
+            CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        cache = PersistentRecipeCache(db_path=temp_db_path)
+        cache.save_cache(sample_recipes)
+
+        conn = sqlite3.connect(temp_db_path)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(recipes)")}
+        conn.close()
+        assert "import_info_json" in columns
+
+        loaded = cache.load_cache()
+        assert loaded is not None
+        assert len(loaded.raw_data) == 2
+
     def test_update_single_recipe(self, temp_db_path, sample_recipes):
         """Test updating a single recipe."""
         cache = PersistentRecipeCache(db_path=temp_db_path)
@@ -551,3 +621,111 @@ class TestPersistentRecipeCache:
         loaded = cache.load_cache()
         assert loaded is not None
         assert loaded.image_id_map == {"222": "new-only"}
+
+    def test_metadata_value_roundtrip(self, temp_db_path):
+        """set_metadata_value/get_metadata_value store and replace values."""
+        cache = PersistentRecipeCache(db_path=temp_db_path)
+
+        assert cache.get_metadata_value("source_path_backfilled") is None
+
+        cache.set_metadata_value("source_path_backfilled", "1")
+        assert cache.get_metadata_value("source_path_backfilled") == "1"
+
+        cache.set_metadata_value("source_path_backfilled", "2")
+        assert cache.get_metadata_value("source_path_backfilled") == "2"
+
+    def test_metadata_value_survives_save_cache(self, temp_db_path, sample_recipes):
+        """A full save_cache must not drop unrelated cache_metadata entries."""
+        cache = PersistentRecipeCache(db_path=temp_db_path)
+
+        cache.set_metadata_value("source_path_backfilled", "1")
+        cache.save_cache(sample_recipes)
+
+        assert cache.get_metadata_value("source_path_backfilled") == "1"
+
+
+class TestHasWorkflowColumn:
+    """has_workflow column persistence (plan 3.1)."""
+
+    def test_save_and_load_roundtrip(self, temp_db_path):
+        """has_workflow must round-trip through save_cache()/load_cache()."""
+        cache = PersistentRecipeCache(db_path=temp_db_path)
+        recipes = [
+            {"id": "wf-1", "title": "Has Workflow", "has_workflow": True},
+            {"id": "wf-2", "title": "No Workflow", "has_workflow": False},
+            {"id": "wf-3", "title": "Unset Workflow"},
+        ]
+        cache.save_cache(recipes)
+
+        loaded = cache.load_cache()
+        assert loaded is not None
+        by_id = {r["id"]: r for r in loaded.raw_data}
+        assert by_id["wf-1"]["has_workflow"] is True
+        assert by_id["wf-2"]["has_workflow"] is False
+        assert by_id["wf-3"]["has_workflow"] is False
+
+    def test_prepare_recipe_row_matches_column_order(self, temp_db_path):
+        """The prepared row must append has_workflow/import_info in column order."""
+        cache = PersistentRecipeCache(db_path=temp_db_path)
+        row_true = cache._prepare_recipe_row({"id": "r1", "has_workflow": True}, "")
+        row_false = cache._prepare_recipe_row({"id": "r2", "has_workflow": False}, "")
+
+        assert row_true[-2] == 1
+        assert row_false[-2] == 0
+        # import_info_json is the trailing column, unset by default.
+        assert row_true[-1] is None
+        assert row_false[-1] is None
+        assert len(row_true) == len(cache._RECIPE_COLUMNS)
+        assert cache._RECIPE_COLUMNS[-2] == "has_workflow"
+        assert cache._RECIPE_COLUMNS[-1] == "import_info_json"
+
+    def test_update_recipe_preserves_has_workflow(self, temp_db_path):
+        """update_recipe() must write the has_workflow column correctly."""
+        cache = PersistentRecipeCache(db_path=temp_db_path)
+        cache.save_cache([{"id": "wf-update", "title": "x", "has_workflow": True}])
+        cache.update_recipe({"id": "wf-update", "title": "y", "has_workflow": False})
+
+        loaded = cache.load_cache()
+        assert loaded is not None
+        assert loaded.raw_data[0]["has_workflow"] is False
+
+    def test_migrates_legacy_database_adds_has_workflow(self, temp_db_path):
+        """A database created before has_workflow existed must still load."""
+        import sqlite3
+
+        conn = sqlite3.connect(temp_db_path)
+        conn.execute(
+            """
+            CREATE TABLE recipes (
+                recipe_id TEXT PRIMARY KEY,
+                file_path TEXT,
+                json_path TEXT,
+                title TEXT,
+                folder TEXT,
+                source_path TEXT,
+                base_model TEXT,
+                fingerprint TEXT,
+                created_date REAL,
+                modified REAL,
+                file_mtime REAL,
+                file_size INTEGER,
+                favorite INTEGER DEFAULT 0,
+                repair_version INTEGER DEFAULT 0,
+                preview_nsfw_level INTEGER DEFAULT 0,
+                loras_json TEXT,
+                checkpoint_json TEXT,
+                gen_params_json TEXT,
+                tags_json TEXT
+            )
+            """
+        )
+        conn.execute("INSERT INTO recipes (recipe_id, title) VALUES ('legacy-1', 'Legacy')")
+        conn.commit()
+        conn.close()
+
+        cache = PersistentRecipeCache(db_path=temp_db_path)
+
+        loaded = cache.load_cache()
+        assert loaded is not None
+        assert loaded.raw_data[0]["id"] == "legacy-1"
+        assert loaded.raw_data[0]["has_workflow"] is False

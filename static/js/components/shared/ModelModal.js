@@ -1,9 +1,7 @@
-import { showToast, openCivitai, sendLoraToWorkflow, sendEmbeddingToWorkflow, sendModelPathToWorkflow, buildLoraSyntax } from '../../utils/uiHelpers.js';
+import { showToast, openCivitai, sendLoraToWorkflow, sendEmbeddingToWorkflow, sendModelPathToWorkflow, buildLoraSyntax, copyToClipboard } from '../../utils/uiHelpers.js';
 import { modalManager } from '../../managers/ModalManager.js';
 import { MODEL_TYPES } from '../../api/apiConfig.js';
 import {
-    toggleShowcase,
-    setupShowcaseScroll,
     scrollToTop,
     loadExampleImages
 } from './showcase/ShowcaseView.js';
@@ -22,6 +20,7 @@ import { parsePresets, renderPresetTags } from './PresetTags.js';
 import { initVersionsTab } from './ModelVersionsTab.js';
 import { loadRecipesForModel } from './RecipeTab.js';
 import { translate } from '../../utils/i18nHelpers.js';
+import { showDeleteModal } from '../../utils/modalUtils.js';
 import { state } from '../../state/index.js';
 
 function getModalFilePath(fallback = '') {
@@ -353,6 +352,39 @@ export async function showModelModal(model, modelType) {
     };
     const escapedFilePathAttr = escapeAttribute(modelWithFullData.file_path || '');
     const escapedFolderPath = escapeHtml((modelWithFullData.file_path || '').replace(/[^/]+$/, '') || 'N/A');
+    // De-emphasized hash display: a borderless full-width footnote line below
+    // the info grid — sha256 middle-truncated (first 10 + last 6), autov3 in
+    // full (12 chars); the full value is copied via data-hash.
+    const modelSha256 = modelWithFullData.sha256 || '';
+    const modelAutov3 = modelWithFullData.autov3 || '';
+    const truncatedSha256 = modelSha256.length > 16
+        ? `${modelSha256.slice(0, 10)}\u2026${modelSha256.slice(-6)}`
+        : modelSha256;
+    const copyHashTitle = translate('modals.model.actions.copyHash', {}, 'Copy hash');
+    const hashEntries = [];
+    if (modelSha256) {
+        hashEntries.push(`
+            <span class="hash-entry">
+                <span class="hash-kind">SHA256</span>
+                <span class="model-hash-value" title="${escapeAttribute(modelSha256)}">${escapeHtml(truncatedSha256)}</span>
+                <button class="hash-copy-btn" data-action="copy-hash" data-hash="${escapeAttribute(modelSha256)}" title="${copyHashTitle}">
+                    <i class="fas fa-copy"></i>
+                </button>
+            </span>`);
+    }
+    if (modelAutov3) {
+        hashEntries.push(`
+            <span class="hash-entry">
+                <span class="hash-kind">AutoV3</span>
+                <span class="model-hash-value" title="${escapeAttribute(modelAutov3)}">${escapeHtml(modelAutov3)}</span>
+                <button class="hash-copy-btn" data-action="copy-hash" data-hash="${escapeAttribute(modelAutov3)}" title="${copyHashTitle}">
+                    <i class="fas fa-copy"></i>
+                </button>
+            </span>`);
+    }
+    const hashesMarkup = modelSha256 && hashEntries.length ? `
+                        <div class="hash-footnote" aria-label="${translate('modals.model.metadata.hashes', {}, 'Hashes')}">${hashEntries.join('<span class="hash-sep">·</span>')}
+                        </div>` : '';
     const useNewIcons = state.global.settings.use_new_license_icons !== false;
     const licenseIcons = useNewIcons
         ? renderNewLicenseIcons(modelWithFullData)
@@ -413,6 +445,17 @@ export async function showModelModal(model, modelType) {
     if (licenseIcons) {
         headerActionItems.push(indentMarkup(licenseIcons.trim(), 20));
     }
+
+    // Destructive action stays last (rightmost). The license icons' auto
+    // margin right-anchors the [license][delete] cluster as one group.
+    const deleteModelTitle = translate('modals.model.actions.deleteModelWithShortcut', {}, 'Delete model (Del)');
+    const deleteModelButton = `
+        <button class="modal-delete-btn" data-action="delete-model" title="${deleteModelTitle}" aria-label="${deleteModelTitle}">
+            <i class="fas fa-trash" aria-hidden="true"></i>
+        </button>
+    `.trim();
+    headerActionItems.push(indentMarkup(deleteModelButton, 20));
+
     const headerActionsMarkup = headerActionItems.length
         ? [
             '                <div class="modal-header-actions">',
@@ -615,6 +658,7 @@ export async function showModelModal(model, modelType) {
                                 <span>${formatFileSize(modelWithFullData.file_size)}</span>
                             </div>
                         </div>
+                        ${hashesMarkup}
                         ${typeSpecificContent}
                         <div class="info-item notes">
                             <div class="notes-header">
@@ -727,18 +771,12 @@ export async function showModelModal(model, modelType) {
         updateCardUpdateAvailability(hasUpdate);
     }
 
-    let showcaseCleanup;
-
     const onCloseCallback = function () {
         // Clean up all handlers when modal closes for LoRA
         const modalElement = document.getElementById(modalId);
         if (modalElement && modalElement._clickHandler) {
             modalElement.removeEventListener('click', modalElement._clickHandler);
             delete modalElement._clickHandler;
-        }
-        if (showcaseCleanup) {
-            showcaseCleanup();
-            showcaseCleanup = null;
         }
         cleanupNavigationShortcuts();
     };
@@ -759,6 +797,14 @@ export async function showModelModal(model, modelType) {
         if (modelType === 'embeddings' && modelWithFullData.folder) {
             activeModalElement.dataset.folder = modelWithFullData.folder;
         }
+        // Show the back-to-top button once the modal content is scrolled
+        const modalContent = activeModalElement.querySelector('.modal-content');
+        const backToTopBtn = activeModalElement.querySelector('.back-to-top');
+        if (modalContent && backToTopBtn) {
+            modalContent.addEventListener('scroll', () => {
+                backToTopBtn.classList.toggle('visible', modalContent.scrollTop > 300);
+            });
+        }
     }
     updateVersionsTabBadge(updateAvailabilityState.hasUpdateAvailable);
     const versionsTabController = initVersionsTab({
@@ -771,7 +817,6 @@ export async function showModelModal(model, modelType) {
         onUpdateStatusChange: handleUpdateStatusChange,
     });
     setupEditableFields(modelWithFullData.file_path, modelType);
-    showcaseCleanup = setupShowcaseScroll(modalId);
     setupTabSwitching({
         onTabChange: async (tab) => {
             if (tab === 'versions') {
@@ -814,7 +859,7 @@ export async function showModelModal(model, modelType) {
     const customImages = modelWithFullData.civitai?.customImages || [];
     // Combine images - regular images first, then custom images
     const allImages = [...regularImages, ...customImages];
-    loadExampleImages(allImages, modelWithFullData.sha256);
+    loadExampleImages(allImages, modelWithFullData.sha256, modelWithFullData.preview_url || '');
 }
 
 function renderLoraSpecificContent(lora, escapedWords) {
@@ -832,8 +877,9 @@ function renderLoraSpecificContent(lora, escapedWords) {
                         <option value="clip_strength">${translate('modals.model.usageTips.clipStrength', {}, 'Clip Strength')}</option>
                         <option value="clip_skip">${translate('modals.model.usageTips.clipSkip', {}, 'Clip Skip')}</option>
                     </select>
-                    <input type="number" id="preset-value" step="0.01" placeholder="${translate('modals.model.usageTips.valuePlaceholder', {}, 'Value')}" style="display:none;">
-                    <button class="add-preset-btn">${translate('modals.model.usageTips.add', {}, 'Add')}</button>
+                    <!-- autofill opt-out attrs prevent password managers / email-alias extensions from attaching popups -->
+                    <input type="number" id="preset-value" step="0.01" placeholder="${translate('modals.model.usageTips.valuePlaceholder', {}, 'Value')}" style="display:none;" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+                    <button class="add-preset-btn" disabled>${translate('modals.model.usageTips.add', {}, 'Add')}</button>
                 </div>
                 <div class="preset-tags">
                     ${renderPresetTags(parsePresets(lora.usage_tips))}
@@ -910,6 +956,14 @@ function setupEventHandlers(filePath, modelType) {
                 break;
             case 'send-to-workflow':
                 handleSendToWorkflow(target, modelType);
+                break;
+            case 'delete-model':
+                handleDeleteModel();
+                break;
+            case 'copy-hash':
+                if (target.dataset.hash) {
+                    copyToClipboard(target.dataset.hash, 'Hash copied to clipboard');
+                }
                 break;
         }
     }
@@ -1033,6 +1087,11 @@ function setupLoraSpecificFields(filePath) {
 
     if (!presetSelector || !presetValue || !addPresetBtn || !presetTags) return;
 
+    // Add button stays disabled until both a parameter and a value are provided
+    const updateAddPresetButtonState = () => {
+        addPresetBtn.disabled = !(presetSelector.value && presetValue.value.trim());
+    };
+
     presetSelector.addEventListener('change', function () {
         const selected = this.value;
         if (selected) {
@@ -1058,12 +1117,16 @@ function setupLoraSpecificFields(filePath) {
         } else {
             presetValue.style.display = 'none';
         }
+        updateAddPresetButtonState();
     });
+
+    presetValue.addEventListener('input', updateAddPresetButtonState);
 
     addPresetBtn.addEventListener('click', async function () {
         const key = presetSelector.value;
-        const value = presetValue.value;
+        const value = presetValue.value.trim();
 
+        // Unreachable via UI while the button is disabled; kept as a safety net
         if (!key || !value) return;
 
         const currentPath = resolveFilePath();
@@ -1078,9 +1141,11 @@ function setupLoraSpecificFields(filePath) {
             document.querySelector(`.model-card[data-filepath="${escapedFilePath}"]`);
         const currentPresets = parsePresets(loraCard?.dataset.usage_tips);
 
+        let isUpdate;
         if (key === 'strength_range') {
             const rangeMatch = value.match(/^(-?\d*\.?\d+)\s*[-~]\s*(-?\d*\.?\d+)$/);
             if (rangeMatch) {
+                isUpdate = 'strength_min' in currentPresets || 'strength_max' in currentPresets;
                 currentPresets['strength_min'] = parseFloat(rangeMatch[1]);
                 currentPresets['strength_max'] = parseFloat(rangeMatch[2]);
             } else {
@@ -1088,17 +1153,36 @@ function setupLoraSpecificFields(filePath) {
                 return;
             }
         } else {
-            currentPresets[key] = parseFloat(value);
+            const numericValue = parseFloat(value);
+            if (!Number.isFinite(numericValue)) {
+                showToast('modals.model.usageTips.invalidValue', {}, 'error', 'Please enter a valid number');
+                return;
+            }
+            isUpdate = key in currentPresets;
+            currentPresets[key] = numericValue;
         }
         const newPresetsJson = JSON.stringify(currentPresets);
 
-        await getModelApiClient().saveModelMetadata(currentPath, { usage_tips: newPresetsJson });
+        try {
+            await getModelApiClient().saveModelMetadata(currentPath, { usage_tips: newPresetsJson });
+        } catch (error) {
+            console.error('Failed to save preset parameter:', error);
+            showToast('modals.model.usageTips.saveFailed', {}, 'error', 'Failed to save preset parameter');
+            return;
+        }
 
         presetTags.innerHTML = renderPresetTags(currentPresets);
+        showToast(
+            isUpdate ? 'modals.model.usageTips.updated' : 'modals.model.usageTips.added',
+            {},
+            'success',
+            isUpdate ? 'Preset parameter updated' : 'Preset parameter added'
+        );
 
         presetSelector.value = '';
         presetValue.value = '';
         presetValue.style.display = 'none';
+        addPresetBtn.disabled = true;
     });
 
     // Add keydown event for preset value
@@ -1180,10 +1264,24 @@ function setupNavigationShortcuts(modelType) {
         } else if (event.key === 'ArrowRight') {
             event.preventDefault();
             handleDirectionalNavigation('next', navigationModelType);
+        } else if (event.key === 'Delete') {
+            event.preventDefault();
+            handleDeleteModel();
         }
     };
 
     document.addEventListener('keydown', navigationKeyHandler);
+}
+
+/**
+ * Open the shared delete confirmation for the model currently shown in the
+ * modal. Showing the delete modal replaces this modal (ModalManager only
+ * keeps one modal open), which also unregisters these shortcuts.
+ */
+function handleDeleteModel() {
+    const filePath = getModalFilePath();
+    if (!filePath) return;
+    showDeleteModal(filePath);
 }
 
 async function handleDirectionalNavigation(direction, modelType) {
@@ -1316,7 +1414,6 @@ async function handleSendToWorkflow(target, modelType) {
 // Export the model modal API
 const modelModal = {
     show: showModelModal,
-    toggleShowcase,
     scrollToTop
 };
 

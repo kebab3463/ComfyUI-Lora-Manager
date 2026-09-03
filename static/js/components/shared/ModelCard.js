@@ -1,10 +1,9 @@
 import { showToast, openCivitai, openHuggingFace, copyToClipboard, copyLoraSyntax, sendLoraToWorkflow, sendEmbeddingToWorkflow, openExampleImagesFolder, buildLoraSyntax, sendModelPathToWorkflow } from '../../utils/uiHelpers.js';
 import { state, getCurrentPageState } from '../../state/index.js';
 import { showModelModal } from './ModelModal.js';
-import { toggleShowcase } from './showcase/ShowcaseView.js';
 import { bulkManager } from '../../managers/BulkManager.js';
 import { modalManager } from '../../managers/ModalManager.js';
-import { NSFW_LEVELS, getBaseModelAbbreviation, getSubTypeAbbreviation, getMatureBlurThreshold, MODEL_SUBTYPE_DISPLAY_NAMES } from '../../utils/constants.js';
+import { NSFW_LEVELS, getBaseModelAbbreviation, getSubTypeAbbreviation, getMatureBlurThreshold, MODEL_SUBTYPE_DISPLAY_NAMES, MODEL_CARD_DRAG_MIME_TYPE } from '../../utils/constants.js';
 import { MODEL_TYPES } from '../../api/apiConfig.js';
 import { getModelApiClient } from '../../api/modelApiFactory.js';
 import { showDeleteModal } from '../../utils/modalUtils.js';
@@ -161,7 +160,10 @@ function handleModelCardEvent_internal(event, modelType) {
     }
 
     // If no specific element was clicked, handle the card click (show modal or toggle selection)
-    handleCardClick(card, modelType);
+    if (state.bulkMode && event.shiftKey) {
+        event.preventDefault(); // keep shift+click from extending a text selection
+    }
+    handleCardClick(card, modelType, event.shiftKey);
     return false; // Continue with other handlers (e.g., bulk selection)
 }
 
@@ -341,12 +343,12 @@ function handleViewLocalVersionsFromCard(card, modelType) {
     }
 }
 
-function handleCardClick(card, modelType) {
+function handleCardClick(card, modelType, extendSelection = false) {
     const pageState = getCurrentPageState();
 
     if (state.bulkMode) {
         // Toggle selection using the bulk manager
-        bulkManager.toggleCardSelection(card);
+        bulkManager.toggleCardSelection(card, extendSelection);
     } else if (pageState && pageState.duplicatesMode) {
         // In duplicates mode, don't open modal when clicking cards
         return;
@@ -356,10 +358,21 @@ function handleCardClick(card, modelType) {
     }
 }
 
+// Preview URL is not in the dataset; read it from the card's rendered media
+function getCardPreviewUrl(card) {
+    const cardMedia = card.querySelector('.card-preview img, .card-preview video');
+    if (!cardMedia) return '';
+    return cardMedia.tagName === 'VIDEO'
+        ? (cardMedia.dataset.src || '')
+        : (cardMedia.src || '');
+}
+
 async function showModelModalFromCard(card, modelType) {
     // Create model metadata object
     const modelMeta = {
         sha256: card.dataset.sha256,
+        autov3: card.dataset.autov3 || '',
+        preview_url: getCardPreviewUrl(card),
         file_path: card.dataset.filepath,
         model_name: card.dataset.name,
         file_name: card.dataset.file_name,
@@ -449,6 +462,8 @@ function showExampleAccessModal(card, modelType) {
             // Get the model data from card dataset (works for both lora and checkpoint)
             const modelMeta = {
                 sha256: card.dataset.sha256,
+                autov3: card.dataset.autov3 || '',
+                preview_url: getCardPreviewUrl(card),
                 file_path: card.dataset.filepath,
                 model_name: card.dataset.name,
                 file_name: card.dataset.file_name,
@@ -473,30 +488,18 @@ function showExampleAccessModal(card, modelType) {
             // Show the model modal
             await showModelModal(modelMeta, modelType);
 
-            // Scroll to import area after modal is visible
+            // Reveal the import entry once the modal content has rendered
             setTimeout(() => {
-                const importArea = document.querySelector('.example-import-area');
+                // Gallery mode: the import button is always visible — expand the zone
+                const importBtn = document.querySelector('#modelModal .gallery-import-btn');
+                if (importBtn) {
+                    importBtn.click();
+                    return;
+                }
+                // Empty state: the import area is the whole tab content — scroll to it
+                const importArea = document.querySelector('#modelModal .example-import-area');
                 if (importArea) {
-                    const showcaseTab = document.getElementById('showcase-tab');
-                    if (showcaseTab) {
-                        // First make sure showcase tab is visible
-                        const tabBtn = document.querySelector('.tab-btn[data-tab="showcase"]');
-                        if (tabBtn && !tabBtn.classList.contains('active')) {
-                            tabBtn.click();
-                        }
-
-                        // Then toggle showcase if collapsed
-                        const carousel = showcaseTab.querySelector('.carousel');
-                        if (carousel && carousel.classList.contains('collapsed')) {
-                            const scrollIndicator = showcaseTab.querySelector('.scroll-indicator');
-                            if (scrollIndicator) {
-                                toggleShowcase(scrollIndicator);
-                            }
-                        }
-
-                        // Finally scroll to the import area
-                        importArea.scrollIntoView({ behavior: 'smooth' });
-                    }
+                    importArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                 }
             }, 500);
         };
@@ -509,8 +512,12 @@ function showExampleAccessModal(card, modelType) {
 export function createModelCard(model, modelType) {
     const card = document.createElement('div');
     card.className = 'model-card';  // Reuse the same class for styling
+    // Always draggable (move-to-folder in the sidebar). Accidental micro-drags
+    // from click jitter are rendered harmless by the preview-drop handlers
+    // below, which ignore internal card drags via MODEL_CARD_DRAG_MIME_TYPE.
     card.draggable = true;
     card.dataset.sha256 = model.sha256;
+    card.dataset.autov3 = model.autov3 || '';
     card.dataset.filepath = model.file_path;
     card.dataset.name = model.model_name;
     card.dataset.file_name = model.file_name;
@@ -597,8 +604,9 @@ export function createModelCard(model, modelType) {
         card.classList.add('excluded-model');
     }
 
-    // Apply selection state if in bulk mode and this card is in the selected set (LoRA only)
-    if (modelType === MODEL_TYPES.LORA && state.bulkMode && state.selectedLoras.has(model.file_path)) {
+    // state.selectedModels resolves to the active page's set (selectedLoras
+    // included) - do not narrow this back to selectedLoras/LORA-only.
+    if (state.bulkMode && state.selectedModels.has(model.file_path)) {
         card.classList.add('selected');
     }
 
@@ -707,7 +715,7 @@ export function createModelCard(model, modelType) {
         <div class="card-preview ${shouldBlur ? 'blurred' : ''}">
             ${isVideo ?
             `<video ${videoAttrs.join(' ')} style="pointer-events: none;"></video>` :
-            `<img src="${versionedPreviewUrl}" alt="${model.model_name}" onerror="this.onerror=null; this.src='/loras_static/images/no-preview.png'">`
+            `<img draggable="false" src="${versionedPreviewUrl}" alt="${model.model_name}" onerror="this.onerror=null; this.src='/loras_static/images/no-preview.png'">`
         }
             <div class="card-header">
                 ${shouldBlur ?
@@ -805,6 +813,11 @@ export function createModelCard(model, modelType) {
 
     // Dropping an image/video onto the card replaces the model preview via the
     // existing replace-preview endpoint (overwrites file on disk, refreshes card).
+    // Internal card drags (move-to-folder) are tagged with a custom MIME type by
+    // SidebarManager and must be ignored here entirely: no highlight, no upload.
+    const isInternalCardDrag = (event) =>
+        Boolean(event.dataTransfer?.types?.includes(MODEL_CARD_DRAG_MIME_TYPE));
+
     const preventDragDefaults = (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -812,17 +825,20 @@ export function createModelCard(model, modelType) {
 
     ['dragenter', 'dragover'].forEach((eventName) => {
         card.addEventListener(eventName, (event) => {
+            if (isInternalCardDrag(event)) return;
             preventDragDefaults(event);
             card.classList.add('drag-over');
         });
     });
 
     card.addEventListener('dragleave', (event) => {
+        if (isInternalCardDrag(event)) return;
         preventDragDefaults(event);
         card.classList.remove('drag-over');
     });
 
     card.addEventListener('drop', (event) => {
+        if (isInternalCardDrag(event)) return;
         preventDragDefaults(event);
         card.classList.remove('drag-over');
 

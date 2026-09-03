@@ -1,11 +1,11 @@
 [project]
 name = "comfyui-lora-manager"
 description = "Revolutionize your workflow with the ultimate LoRA companion for ComfyUI!"
-version = "1.2.0"
+version = "1.2.1"
 license = {file = "LICENSE"}
 dependencies = [
     "aiohttp",
-    "jinja2", 
+    "jinja2",
     "safetensors",
     "piexif",
     "Pillow",
@@ -15,7 +15,8 @@ dependencies = [
     "GitPython",
     "aiosqlite",
     "platformdirs",
-    "pyyaml"
+    "pyyaml",
+    "pytest>=9.1.1",
 ]
 
 [project.urls]
