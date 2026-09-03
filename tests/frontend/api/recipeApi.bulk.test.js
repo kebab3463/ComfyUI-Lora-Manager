@@ -49,9 +49,24 @@ import {
   updateRecipeMetadata
 } from '../../../static/js/api/recipeApi.js';
 
+// jsdom ships a WebSocket that never opens or errors against a dead endpoint,
+// which would hang refreshRecipes()'s scan-progress connect. Stub it so the
+// connection resolves immediately.
+class FakeWebSocket {
+  constructor(url) {
+    this.url = url;
+    this.onopen = null;
+    this.onerror = null;
+    this.onmessage = null;
+    this.close = vi.fn();
+    queueMicrotask(() => this.onopen?.());
+  }
+}
+
 describe('RecipeSidebarApiClient bulk operations', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('WebSocket', FakeWebSocket);
     global.fetch = vi.fn();
     getCurrentPageStateMock.mockReturnValue({
       pageSize: 50,
@@ -69,6 +84,7 @@ describe('RecipeSidebarApiClient bulk operations', () => {
 
   afterEach(() => {
     delete global.fetch;
+    vi.unstubAllGlobals();
   });
 
   it('sends recipe IDs when moving in bulk', async () => {

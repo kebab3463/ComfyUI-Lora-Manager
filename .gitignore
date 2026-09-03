@@ -44,3 +44,5 @@ tests/enrich_hf_validation/baselines/
 
 # Local Python virtual environment
 .venv/
+
+.envrc
