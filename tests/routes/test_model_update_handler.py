@@ -209,6 +209,8 @@ async def test_get_civitai_versions_degrades_when_download_history_unavailable(m
         metadata_sync=SimpleNamespace(),  # pyright: ignore[reportArgumentType]
         metadata_refresh_use_case=SimpleNamespace(),  # pyright: ignore[reportArgumentType]
         metadata_progress_callback=lambda *_args, **_kwargs: None,  # pyright: ignore[reportArgumentType]
+        stats_refresh_use_case=SimpleNamespace(),  # pyright: ignore[reportArgumentType]
+        parse_list_params=lambda _request: {},
     )
 
     response = await handler.get_civitai_versions(

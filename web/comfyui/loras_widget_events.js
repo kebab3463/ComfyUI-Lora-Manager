@@ -757,9 +757,102 @@ export function createContextMenu(x, y, loraName, widget, previewTooltip, render
     }
   );
 
+  // Favorite toggle, mirroring the star on the cards in the LoRA Manager tab.
+  //
+  // The correct label depends on state we do not have when the menu opens,
+  // and a context menu has to appear instantly. So the item renders as
+  // "Add to Favorites" and corrects itself when the lookup lands — normally
+  // a few milliseconds, since it is a read from the in-memory model cache.
+  const starOutlineIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>';
+  const starFilledIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>';
+
+  const favoriteState = { known: false, favorite: false, filePath: '' };
+
+  const readFavoriteState = async () => {
+    const response = await api.fetchApi(
+      `/lm/loras/favorite?name=${encodeURIComponent(loraName)}`
+    );
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || 'Failed to read favorite status');
+    }
+    const data = await response.json();
+    if (!data.success) {
+      throw new Error(data.error || 'Failed to read favorite status');
+    }
+    favoriteState.known = true;
+    favoriteState.favorite = data.favorite === true;
+    favoriteState.filePath = data.file_path || '';
+    return favoriteState;
+  };
+
+  const favoriteOption = createMenuItem(
+    'Add to Favorites',
+    starOutlineIcon,
+    async () => {
+      menu.remove();
+      document.removeEventListener('click', closeMenu);
+
+      try {
+        // The click can land before the lookup does, and it is also the
+        // only place a failure is worth reporting — a menu that opens with
+        // a toast because a LoRA is missing from the cache would be noise.
+        if (!favoriteState.known) {
+          await readFavoriteState();
+        }
+        if (!favoriteState.filePath) {
+          throw new Error('This LoRA is not in the LoRA Manager cache');
+        }
+
+        const nextFavorite = !favoriteState.favorite;
+        const response = await api.fetchApi('/lm/loras/save-metadata', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file_path: favoriteState.filePath,
+            favorite: nextFavorite,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(errorText || 'Failed to update favorite status');
+        }
+
+        favoriteState.favorite = nextFavorite;
+        showToast(
+          nextFavorite ? 'Added to favorites' : 'Removed from favorites',
+          'success'
+        );
+      } catch (error) {
+        console.error('Error updating favorite status:', error);
+        showToast(error.message || 'Failed to update favorite status', 'error');
+      }
+    }
+  );
+
+  const applyFavoriteLabel = () => {
+    const textEl = favoriteOption.querySelector('span');
+    const iconEl = favoriteOption.querySelector('.lm-lora-menu-item-icon');
+    if (textEl) {
+      textEl.textContent = favoriteState.favorite
+        ? 'Remove from Favorites'
+        : 'Add to Favorites';
+    }
+    if (iconEl) {
+      iconEl.innerHTML = favoriteState.favorite ? starFilledIcon : starOutlineIcon;
+    }
+  };
+
+  readFavoriteState().then(applyFavoriteLabel).catch((error) => {
+    // Stay silent here. The menu keeps its default label, and if the user
+    // actually clicks it the handler retries and reports properly.
+    console.debug('Could not read favorite status:', error);
+  });
+
   // Delete option with trash icon
   const deleteOption = createMenuItem(
-    'Delete', 
+    'Delete',
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>',
     () => {
       menu.remove();
@@ -964,6 +1057,7 @@ export function createContextMenu(x, y, loraName, widget, previewTooltip, render
   const orderSeparator = document.createElement('hr');
 
   menu.appendChild(viewOnCivitaiOption);
+  menu.appendChild(favoriteOption);
   menu.appendChild(deleteOption);
   menu.appendChild(separator1);
   menu.appendChild(moveUpOption);

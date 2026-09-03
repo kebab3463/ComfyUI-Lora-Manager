@@ -45,6 +45,10 @@ export class LorasControls extends PageControls {
             fetchFromCivitai: async () => {
                 return await getModelApiClient().fetchCivitaiMetadata();
             },
+
+            refreshCivitaiStats: async () => {
+                return await getModelApiClient().refreshCivitaiStats();
+            },
             
             showDownloadModal: () => {
                 downloadManager.showDownloadModal();

@@ -8,6 +8,24 @@ from py.services.model_cache import ModelCache
 from py.services.model_query import ModelCacheRepository, SortParams
 
 
+def _make_stats_cache(entries):
+    """Build a cache from (name, stats_dict_or_None) pairs."""
+    raw = []
+    for name, stats in entries:
+        item = {
+            "file_path": f"/models/{name}.safetensors",
+            "file_name": f"{name}.safetensors",
+            "model_name": name,
+            "folder": "",
+            "size": 100,
+            "modified": 0.0,
+        }
+        if stats is not None:
+            item["civitai"] = {"id": 1, "stats": stats}
+        raw.append(item)
+    return ModelCache(raw_data=raw, folders=[])
+
+
 def _make_cache(items):
     return ModelCache(
         raw_data=[
@@ -95,3 +113,82 @@ class TestRandomShuffle:
         assert [item["model_name"] for item in first] == [
             item["model_name"] for item in second
         ]
+
+
+class TestCivitaiStatSort:
+    @pytest.mark.asyncio
+    async def test_likes_desc_orders_by_thumbs_up(self):
+        cache = _make_stats_cache(
+            [
+                ("low", {"thumbsUpCount": 5}),
+                ("high", {"thumbsUpCount": 900}),
+                ("mid", {"thumbsUpCount": 42}),
+            ]
+        )
+        await asyncio.sleep(0)
+
+        result = await cache.get_sorted_data("likes", "desc")
+
+        assert [item["model_name"] for item in result] == ["high", "mid", "low"]
+
+    @pytest.mark.asyncio
+    async def test_never_fetched_sorts_below_a_genuine_zero(self):
+        cache = _make_stats_cache(
+            [
+                ("unknown", None),
+                ("zero", {"thumbsUpCount": 0}),
+                ("one", {"thumbsUpCount": 1}),
+            ]
+        )
+        await asyncio.sleep(0)
+
+        descending = await cache.get_sorted_data("likes", "desc")
+        assert [item["model_name"] for item in descending] == ["one", "zero", "unknown"]
+
+        ascending = await cache.get_sorted_data("likes", "asc")
+        assert [item["model_name"] for item in ascending] == ["unknown", "zero", "one"]
+
+    @pytest.mark.asyncio
+    async def test_downloads_sort_uses_download_count(self):
+        cache = _make_stats_cache(
+            [
+                ("a", {"thumbsUpCount": 999, "downloadCount": 1}),
+                ("b", {"thumbsUpCount": 0, "downloadCount": 500}),
+            ]
+        )
+        await asyncio.sleep(0)
+
+        result = await cache.get_sorted_data("downloads", "desc")
+
+        assert [item["model_name"] for item in result] == ["b", "a"]
+
+    @pytest.mark.asyncio
+    async def test_ties_break_on_name_then_path(self):
+        cache = _make_stats_cache(
+            [
+                ("zebra", {"thumbsUpCount": 10}),
+                ("alpha", {"thumbsUpCount": 10}),
+                ("mango", {"thumbsUpCount": 10}),
+            ]
+        )
+        await asyncio.sleep(0)
+
+        result = await cache.get_sorted_data("likes", "asc")
+
+        assert [item["model_name"] for item in result] == ["alpha", "mango", "zebra"]
+
+    @pytest.mark.asyncio
+    async def test_malformed_stats_are_treated_as_unknown(self):
+        cache = _make_stats_cache(
+            [
+                ("bad_type", {"thumbsUpCount": "many"}),
+                ("bool_value", {"thumbsUpCount": True}),
+                ("real", {"thumbsUpCount": 3}),
+            ]
+        )
+        await asyncio.sleep(0)
+
+        result = await cache.get_sorted_data("likes", "desc")
+
+        assert result[0]["model_name"] == "real"
+        assert {item["model_name"] for item in result[1:]} == {"bad_type", "bool_value"}

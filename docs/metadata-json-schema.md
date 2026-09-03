@@ -116,21 +116,21 @@ The `civitai` object stores the complete Civitai/CivArchive API response. Lora M
 | `creator` | object | Creator information (see Creator Fields below) |
 | `files` | array[object] | File list with hashes, sizes, download URLs (used for metadata extraction) |
 | `images` | array[object] | Image list with metadata, prompts, NSFW levels (used for preview/examples) |
+| `stats` | object | Version statistics (see Stats Fields below); powers the likes/downloads sorts and card counters |
+| `publishedAt` | string (ISO 8601) | Publication timestamp; shown on the model card as the upload age |
+| `createdAt` | string (ISO 8601) | Creation timestamp; used as the upload-age fallback when `publishedAt` is absent |
 
 **Fields Stored but Not Currently Used:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `createdAt` | string (ISO 8601) | Creation timestamp |
 | `updatedAt` | string (ISO 8601) | Last update timestamp |
 | `status` | string | Version status (e.g., `"Published"`, `"Draft"`) |
-| `publishedAt` | string (ISO 8601) | Publication timestamp |
 | `baseModelType` | string | Base model type (e.g., `"Standard"`, `"Inpaint"`, `"Refiner"`) |
 | `earlyAccessConfig` | object | Early access configuration |
 | `uploadType` | string | Upload type (`"Created"`, `"FineTuned"`, etc.) |
 | `usageControl` | string | Usage control setting |
 | `air` | string | Artifact ID (URN format: `urn:air:sdxl:lora:civitai:122359@135867`) |
-| `stats` | object | Download count, ratings, thumbs up count |
 | `videos` | array[object] | Video list |
 | `downloadUrl` | string | Direct download URL |
 | `trainingStatus` | string\|null | Training status (for on-site training) |
@@ -166,6 +166,23 @@ Both fields are used by Lora Manager:
 |-------|------|-------------|
 | `username` | string | Creator username (used for author display and search) |
 | `image` | string | Creator avatar URL (used for display) |
+
+### Stats Fields (`civitai.stats.*`)
+
+Version popularity counters, refreshed on demand via the toolbar's
+**Fetch ▸ Fetch Civitai Stats** action (scoped to the models matching the
+current folder/search/filters) and also written by any full metadata refresh.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `thumbsUpCount` | integer | Likes on this version (backs the "Civitai Likes" sort and the card counter) |
+| `downloadCount` | integer | Downloads of this version (backs the "Civitai Downloads" sort and the card counter) |
+| `ratingCount` | integer | Number of ratings (stored, not yet surfaced) |
+| `rating` | number | Average rating (stored, not yet surfaced) |
+
+Only these four numeric keys are projected into the model cache; any other keys
+Civitai returns under `stats` stay in the sidecar but are dropped from the cache.
+A missing counter means "never fetched" and sorts below a genuine `0`.
 
 ### Model Type Field (Top-Level, Outside `civitai`)
 

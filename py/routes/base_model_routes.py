@@ -24,6 +24,7 @@ from ..services.use_cases import (
     AutoOrganizeUseCase,
     BulkMetadataRefreshUseCase,
     DownloadModelUseCase,
+    RefreshModelStatsUseCase,
 )
 from ..services.websocket_progress_callback import (
     WebSocketBroadcastCallback,
@@ -177,6 +178,11 @@ class BaseModelRoutes(ABC):
             settings_service=self._settings,
             logger=logger,
         )
+        stats_refresh_use_case = RefreshModelStatsUseCase(
+            service=service,
+            metadata_manager=MetadataManager,
+            logger=logger,
+        )
         civitai = ModelCivitaiHandler(
             service=service,
             settings_service=self._settings,
@@ -189,6 +195,8 @@ class BaseModelRoutes(ABC):
             metadata_sync=self._metadata_sync_service,
             metadata_refresh_use_case=metadata_refresh_use_case,
             metadata_progress_callback=self.metadata_progress_callback,
+            stats_refresh_use_case=stats_refresh_use_case,
+            parse_list_params=listing._parse_common_params,
         )
         move = ModelMoveHandler(move_service=self._ensure_move_service(), logger=logger)
         auto_organize_use_case = AutoOrganizeUseCase(

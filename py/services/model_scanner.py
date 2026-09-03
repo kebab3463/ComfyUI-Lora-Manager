@@ -12,7 +12,7 @@ from ..config import config
 from ..utils.file_utils import find_preview_file, get_preview_extension, calculate_sha256, calculate_autov3
 from ..utils.metadata_manager import MetadataManager
 from ..utils.civitai_utils import resolve_license_info
-from .model_cache import ModelCache
+from .model_cache import ModelCache, get_civitai_stat
 from .model_hash_index import ModelHashIndex
 from .model_lifecycle_service import delete_model_artifacts, _require_path_in_library_roots
 from .service_registry import ServiceRegistry
@@ -191,6 +191,13 @@ class ModelScanner:
             if value not in (None, '', []):
                 slim[key] = value
 
+        # Normalized onto a single key: the cache is a projection, and Civitai's
+        # publish date falls back to the creation date the same way
+        # ModelUpdateService resolves a version's release date.
+        published_at = civitai.get('publishedAt') or civitai.get('createdAt')
+        if isinstance(published_at, str) and published_at:
+            slim['publishedAt'] = published_at
+
         creator = civitai.get('creator')
         if isinstance(creator, Mapping):
             username = creator.get('username')
@@ -206,6 +213,25 @@ class ModelScanner:
             model_type_value = civitai_model.get('type')
             if model_type_value not in (None, '', []):
                 slim['model'] = {'type': model_type_value}
+
+        stats = self._slim_civitai_stats(civitai.get('stats'))
+        if stats:
+            slim['stats'] = stats
+
+        return slim or None
+
+    @staticmethod
+    def _slim_civitai_stats(stats: Any) -> Optional[Dict[str, Any]]:
+        """Return the numeric subset of a Civitai version ``stats`` block."""
+        if not isinstance(stats, Mapping) or not stats:
+            return None
+
+        slim: Dict[str, Any] = {}
+        for key in ('thumbsUpCount', 'downloadCount', 'ratingCount', 'rating'):
+            value = stats.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            slim[key] = value
 
         return slim or None
 
@@ -295,6 +321,7 @@ class ModelScanner:
             'preview_nsfw_level': int(get_value('preview_nsfw_level', 0) or 0),
             'from_civitai': bool(get_value('from_civitai', True)),
             'favorite': bool(get_value('favorite', False)),
+            'pinned': bool(get_value('pinned', False)),
             'notes': notes,
             'usage_tips': usage_tips,
             'metadata_source': get_value('metadata_source', None),
@@ -1760,7 +1787,11 @@ class ModelScanner:
         return True
         
     async def sync_cache_from_metadata(
-        self, file_path: str, metadata_dict: Dict[str, Any]
+        self,
+        file_path: str,
+        metadata_dict: Dict[str, Any],
+        *,
+        defer_resort: bool = False,
     ) -> bool:
         """Opportunistically sync in-memory and persistent caches from metadata.
 
@@ -1786,6 +1817,16 @@ class ModelScanner:
           via :meth:`PersistentModelCache.update_single_model` rather than a
           full-table ``save_cache()``.
 
+        Args:
+            defer_resort: Skip the conditional ``resort()``.  Intended for bulk
+                callers updating many models under one active sort, where a
+                per-model resort costs O(models x library size log library
+                size) to produce an ordering that is immediately superseded.
+                Such callers **must** call :meth:`ModelCache.resort` once when
+                they finish; until they do, ``_last_sorted_data`` holds a stale
+                *ordering*.  The entries themselves are updated in place, so a
+                concurrent reader still sees current values.
+
         Returns:
             ``True`` if any cache update was performed, ``False`` if the
             caches were already in sync.
@@ -1798,7 +1839,7 @@ class ModelScanner:
         """
         try:
             return await self._sync_cache_from_metadata_impl(
-                file_path, metadata_dict
+                file_path, metadata_dict, defer_resort=defer_resort
             )
         except Exception:
             logger.warning(
@@ -1809,7 +1850,11 @@ class ModelScanner:
             return False
 
     async def _sync_cache_from_metadata_impl(
-        self, file_path: str, metadata_dict: Dict[str, Any]
+        self,
+        file_path: str,
+        metadata_dict: Dict[str, Any],
+        *,
+        defer_resort: bool = False,
     ) -> bool:
         cache = await self.get_cached_data()
 
@@ -1934,8 +1979,14 @@ class ModelScanner:
         elif sort_key == "size":
             if old_size != int(desired_entry.get("size", 0) or 0):
                 need_resort = True
+        elif sort_key in ("likes", "downloads"):
+            stat_key = "thumbsUpCount" if sort_key == "likes" else "downloadCount"
+            if get_civitai_stat({"civitai": old_civitai}, stat_key) != get_civitai_stat(
+                desired_entry, stat_key
+            ):
+                need_resort = True
 
-        if need_resort:
+        if need_resort and not defer_resort:
             await cache.resort()
 
         # ---- Targeted SQL update (single row, not full save_cache) ----

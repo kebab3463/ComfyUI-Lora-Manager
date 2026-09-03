@@ -82,6 +82,19 @@
     </div>
 </div>
 
+<!-- Refresh Civitai Stats Confirmation Modal -->
+<div id="refreshStatsConfirmModal" class="modal delete-modal">
+    <div class="modal-content delete-modal-content">
+        <h2 data-role="title"></h2>
+        <p class="confirmation-message" data-role="message"></p>
+        <p class="confirmation-tip" data-role="tip"></p>
+        <div class="modal-actions">
+            <button class="cancel-btn" data-action="cancel-refresh-stats">{{ t('common.actions.cancel') }}</button>
+            <button class="primary-btn" data-action="confirm-refresh-stats">{{ t('modals.refreshStats.action', default='Fetch Stats') }}</button>
+        </div>
+    </div>
+</div>
+
 <!-- Bulk Download Missing LoRAs Confirmation Modal -->
 <div id="bulkDownloadMissingLorasModal" class="modal">
     <div class="modal-content">

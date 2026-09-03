@@ -11,6 +11,58 @@ import { showDeleteModal } from '../../utils/modalUtils.js';
 import { translate } from '../../utils/i18nHelpers.js';
 import { eventManager } from '../../utils/EventManager.js';
 
+// Compact number formatting for Civitai counters (1234 -> "1.2k")
+function formatStatCount(value) {
+    if (value < 1000) {
+        return String(value);
+    }
+    if (value < 1000000) {
+        const thousands = value / 1000;
+        return `${thousands < 10 ? thousands.toFixed(1) : Math.round(thousands)}k`;
+    }
+    const millions = value / 1000000;
+    return `${millions < 10 ? millions.toFixed(1) : Math.round(millions)}M`;
+}
+
+// Read a numeric Civitai version stat, or null when it has never been fetched
+function getCivitaiStat(model, key) {
+    const value = model.civitai?.stats?.[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+// Average month length, so "rounded to the nearest month" stays accurate
+// across the varying-length months an upload date can span.
+const DAYS_PER_MONTH = 30.436875;
+
+// How long ago a version was uploaded, rounded to the nearest month.
+// Returns null when the date is missing or unparseable, so the card simply
+// omits the badge rather than rendering "NaN".
+export function formatUploadAge(model) {
+    // The cache projection normalizes onto publishedAt; full metadata payloads
+    // may still carry only createdAt.
+    const raw = model.civitai?.publishedAt || model.civitai?.createdAt;
+    if (typeof raw !== 'string' || !raw) return null;
+
+    const uploaded = Date.parse(raw);
+    if (!Number.isFinite(uploaded)) return null;
+
+    const months = Math.round((Date.now() - uploaded) / (DAYS_PER_MONTH * 86400000));
+    if (months < 0) return null;
+    if (months === 0) return translate('modelCard.uploaded.thisMonth', {}, 'this month');
+    if (months < 12) return translate('modelCard.uploaded.months', { count: months }, `${months}mo ago`);
+
+    const years = Math.floor(months / 12);
+    const remainder = months % 12;
+    if (remainder === 0) {
+        return translate('modelCard.uploaded.years', { count: years }, `${years}y ago`);
+    }
+    return translate(
+        'modelCard.uploaded.yearsMonths',
+        { years, months: remainder },
+        `${years}y ${remainder}mo ago`,
+    );
+}
+
 // Helper function to get display name based on settings
 function getDisplayName(model) {
     const displayNameSetting = state.global.settings.model_name_display || 'model_name';
@@ -470,6 +522,7 @@ export function createModelCard(model, modelType) {
     card.dataset.notes = model.notes || '';
     card.dataset.base_model = model.base_model || 'Unknown';
     card.dataset.favorite = model.favorite ? 'true' : 'false';
+    card.dataset.pinned = model.pinned ? 'true' : 'false';
     card.dataset.exclude = model.exclude ? 'true' : 'false';
     card.dataset.hf_url = model.hf_url || '';
     const hasUpdateAvailable = Boolean(model.update_available);
@@ -480,10 +533,15 @@ export function createModelCard(model, modelType) {
         card.dataset.version_count = model.version_count;
     }
 
-    // To only show usage_count when sorting by usage. 
+    // To only show usage_count when sorting by usage.
     const pageState = getCurrentPageState();
     const isUsageSort = pageState?.sortBy?.startsWith('usage');
     const hasUsageCount = isUsageSort && typeof model.usage_count === 'number';
+
+    // Civitai stats are shown whenever they are known, regardless of sort.
+    const likeCount = getCivitaiStat(model, 'thumbsUpCount');
+    const downloadCount = getCivitaiStat(model, 'downloadCount');
+    const uploadAge = formatUploadAge(model);
 
     const civitaiData = model.civitai || {};
     const modelId = civitaiData?.modelId ?? civitaiData?.model_id;
@@ -724,6 +782,10 @@ export function createModelCard(model, modelType) {
                             return `<span class="badge-version-unit">${badges}${versionHtml}</span>`;
                         })()}
                         ${hasUsageCount ? `<span class="version-name" title="${translate('modelCard.usage.timesUsed', {}, 'Times used')}">${model.usage_count}×</span>` : ''}
+                        ${likeCount !== null ? `<span class="civitai-stat civitai-stat--likes" title="${translate('modelCard.stats.likes', {}, 'Civitai likes')}"><i class="fas fa-thumbs-up"></i>${formatStatCount(likeCount)}</span>` : ''}
+                        ${downloadCount !== null ? `<span class="civitai-stat civitai-stat--downloads" title="${translate('modelCard.stats.downloads', {}, 'Civitai downloads')}"><i class="fas fa-download"></i>${formatStatCount(downloadCount)}</span>` : ''}
+                        ${uploadAge !== null ? `<span class="civitai-stat civitai-stat--uploaded" title="${translate('modelCard.uploaded.title', {}, 'Uploaded to Civitai')}"><i class="fas fa-clock"></i>${uploadAge}</span>` : ''}
+                        ${model.pinned ? `<span class="civitai-stat civitai-stat--pinned" title="${translate('modelCard.pinned.title', {}, 'Pinned version for this model')}"><i class="fas fa-thumbtack"></i></span>` : ''}
                     </div>
                 </div>
                 <div class="card-actions">

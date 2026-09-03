@@ -147,9 +147,23 @@
         "usage": {
             "timesUsed": "מספר שימושים"
         },
+        "stats": {
+            "likes": "[TODO: Translate] Civitai likes",
+            "downloads": "[TODO: Translate] Civitai downloads"
+        },
         "footer": {
             "versionCount": "{count} גרסאות",
             "viewAllVersions": "הצג את כל הגרסאות המקומיות"
+        },
+        "uploaded": {
+            "title": "[TODO: Translate] Uploaded to Civitai",
+            "thisMonth": "[TODO: Translate] this month",
+            "months": "[TODO: Translate] {{count}}mo ago",
+            "years": "[TODO: Translate] {{years}}y ago",
+            "yearsMonths": "[TODO: Translate] {{years}}y {{months}}mo ago"
+        },
+        "pinned": {
+            "title": "[TODO: Translate] Pinned as this model's version"
         }
     },
     "globalContextMenu": {
@@ -736,6 +750,12 @@
                 "versionsCountDesc": "הכי הרבה גרסאות ראשונות",
                 "versionsCountAsc": "הכי מעט גרסאות ראשונות",
                 "versionIdDesc": "גרסה חדשה ביותר ראשונה",
+                "likes": "[TODO: Translate] Civitai Likes",
+                "likesDesc": "[TODO: Translate] Most liked",
+                "likesAsc": "[TODO: Translate] Least liked",
+                "downloads": "[TODO: Translate] Civitai Downloads",
+                "downloadsDesc": "[TODO: Translate] Most downloaded",
+                "downloadsAsc": "[TODO: Translate] Least downloaded",
                 "random": "אקראי",
                 "randomAction": "ערבוב אקראי"
             },
@@ -746,7 +766,10 @@
             },
             "fetch": {
                 "title": "אחזר מטא-דאטה מ-Civitai",
-                "action": "אחזר"
+                "action": "אחזר",
+                "menuLabel": "[TODO: Translate] Show fetch options",
+                "stats": "[TODO: Translate] Fetch Civitai Stats",
+                "statsTooltip": "[TODO: Translate] Fetch Civitai like and download counts for the models currently listed."
             },
             "download": {
                 "title": "הורד מכתובת URL",
@@ -847,7 +870,11 @@
             "viewAllLoras": "הצג את כל ה-LoRAs",
             "downloadMissingLoras": "הורד LoRAs חסרים",
             "deleteRecipe": "מחק מתכון",
-            "enrichHfAgent": "העשרת HF מטא-דאטה (AI)"
+            "enrichHfAgent": "העשרת HF מטא-דאטה (AI)",
+            "pinVersion": "[TODO: Translate] Pin this version",
+            "unpinVersion": "[TODO: Translate] Unpin version",
+            "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
         }
     },
     "recipes": {
@@ -1328,6 +1355,12 @@
             "message": "הפעולה תבדוק עדכונים עבור כל ה-{typePlural} בספרייה שלך. באוספים גדולים זה עלול לקחת מעט יותר זמן.",
             "tip": "רוצים לחלק למנות קטנות? עברו למצב קבוצתי, בחרו את המודלים הדרושים ואז השתמשו ב\"בדוק עדכונים לנבחרים\".",
             "action": "בדוק הכל"
+        },
+        "refreshStats": {
+            "title": "[TODO: Translate] Fetch Civitai stats for {count} {typePlural}?",
+            "message": "[TODO: Translate] This fetches like and download counts for the {count} {typePlural} matching your current folder and filters.",
+            "tip": "[TODO: Translate] To fetch fewer, narrow the folder or search first — only what is currently listed gets updated.",
+            "action": "[TODO: Translate] Fetch Stats"
         },
         "bulkAddTags": {
             "title": "הוסף תגיות למספר מודלים",
@@ -2054,7 +2087,10 @@
             "tagsAddFailed": "הוספת תגיות ל-{count} מודל(ים) נכשלה",
             "tagsReplaceFailed": "החלפת תגיות עבור {count} מודל(ים) נכשלה",
             "bulkTagsAddFailed": "הוספת תגיות למודלים נכשלה",
-            "bulkTagsReplaceFailed": "החלפת תגיות למודלים נכשלה"
+            "bulkTagsReplaceFailed": "החלפת תגיות למודלים נכשלה",
+            "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
+            "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
         },
         "search": {
             "atLeastOneOption": "יש לבחור לפחות אפשרות חיפוש אחת"
@@ -2156,7 +2192,8 @@
             "reloadFailed": "טעינה מחדש של {pageType} נכשלה: {message}",
             "refreshFailed": "{action} של {pageType} נכשל: {message}",
             "fetchMetadataFailed": "אחזור המטא-דאטה נכשל: {message}",
-            "clearFilterFailed": "ניקוי המסנן המותאם אישית נכשל: {message}"
+            "clearFilterFailed": "ניקוי המסנן המותאם אישית נכשל: {message}",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh Civitai stats: {message}"
         },
         "contextMenu": {
             "contentRatingSet": "דירוג התוכן הוגדר ל-{level}",
@@ -2226,7 +2263,16 @@
             "exampleImagesDownloadFailed": "הורדת תמונות הדוגמה נכשלה: {message}",
             "moveFailed": "Failed to move item: {message}",
             "copiedToClipboard": "הועתק ללוח",
-            "downloadStarted": "ההורדה החלה"
+            "downloadStarted": "ההורדה החלה",
+            "statsRefreshEmpty": "[TODO: Translate] No models match the current filters",
+            "statsRefreshStarting": "[TODO: Translate] Starting stats fetch...",
+            "statsRefreshProgress": "[TODO: Translate] Processing ({processed}/{total})",
+            "statsRefreshComplete": "[TODO: Translate] Completed: updated {success} of {processed} {type}s",
+            "statsRefreshRateLimited": "[TODO: Translate] Civitai rate limit reached; try again later",
+            "statsRefreshSuccess": "[TODO: Translate] Updated stats for {success} {type}s",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh stats: {message}",
+            "statsRefreshConnecting": "[TODO: Translate] Connecting...",
+            "statsRefreshDone": "[TODO: Translate] Stats update complete"
         },
         "agent": {
             "llmNotConfigured": "ספק AI לא הוגדר. הפעל אותו בהגדרות → ספק AI.",

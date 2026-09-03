@@ -11,6 +11,7 @@ import {
     WS_ENDPOINTS
 } from './apiConfig.js';
 import { resetAndReload } from './modelApiFactory.js';
+import { confirmStatsRefresh } from '../utils/statsRefreshHelpers.js';
 import { sidebarManager } from '../components/SidebarManager.js';
 
 /**
@@ -471,6 +472,24 @@ export class BaseModelApiClient {
         }
     }
 
+    /**
+     * Pin (or unpin) a version as the representative of its model group.
+     * The backend clears any sibling pin, so the group keeps one representative.
+     */
+    async pinVersion(filePath, pinned = true) {
+        const response = await fetch(this.apiConfig.endpoints.pinVersion, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_path: filePath, pinned }),
+        });
+
+        if (!response.ok) {
+            throw new Error(await response.text() || 'Failed to pin version');
+        }
+
+        return response.json();
+    }
+
     async addTags(filePath, data) {
         try {
             state.loadingManager.showSimpleLoading('Adding tags...');
@@ -686,6 +705,146 @@ export class BaseModelApiClient {
         }, {
             initialMessage: 'Connecting...',
             completionMessage: 'Metadata update complete'
+        });
+    }
+
+    /**
+     * Refresh Civitai like/download counts for every model matching the current
+     * folder, search and filter state — not just the rows already scrolled into
+     * view. The scope is expressed with the same query parameters the list
+     * endpoint uses, so the backend resolves the exact same set of models.
+     */
+    async refreshCivitaiStats() {
+        const pageState = this.getPageState();
+        const params = this._buildQueryParams({ sort_by: pageState.sortBy }, pageState);
+
+        // A wildcard base-model filter that matched nothing short-circuits here.
+        if (params === null) {
+            showToast('toast.api.statsRefreshEmpty', {}, 'info', 'No models match the current filters');
+            return;
+        }
+
+        const displayName = this.apiConfig.config.displayName;
+        const count = state.virtualScroller?.totalItems ?? 0;
+        if (count === 0) {
+            showToast('toast.api.statsRefreshEmpty', {}, 'info', 'No models match the current filters');
+            return;
+        }
+
+        const proceed = await confirmStatsRefresh(displayName, count);
+        if (!proceed) {
+            return;
+        }
+
+        let ws = null;
+
+        await state.loadingManager.showWithProgress(async (loading) => {
+            try {
+                loading.showCancelButton(() => this.cancelTask());
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+                ws = new WebSocket(`${wsProtocol}${window.location.host}${WS_ENDPOINTS.fetchProgress}`);
+
+                await new Promise((resolve, reject) => {
+                    ws.onopen = resolve;
+                    ws.onerror = reject;
+                });
+
+                const operationComplete = new Promise((resolve, reject) => {
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+
+                        // /ws/fetch-progress is shared with other bulk jobs.
+                        if (data.type !== 'stats_refresh_progress') {
+                            return;
+                        }
+
+                        switch (data.status) {
+                            case 'started':
+                                loading.setStatus(translate('toast.api.statsRefreshStarting', {}, 'Starting stats fetch...'));
+                                break;
+
+                            case 'processing': {
+                                const percent = data.total ? ((data.processed / data.total) * 100).toFixed(1) : 0;
+                                loading.setProgress(percent);
+                                let statusText = translate(
+                                    'toast.api.statsRefreshProgress',
+                                    { processed: data.processed, total: data.total },
+                                    `Processing (${data.processed}/${data.total})`
+                                );
+                                if (data.failure_count > 0) {
+                                    statusText += ` | ❌ ${data.failure_count}`;
+                                }
+                                loading.setStatus(statusText);
+                                break;
+                            }
+
+                            case 'completed': {
+                                loading.setProgress(100);
+                                loading.setStatus(translate(
+                                    'toast.api.statsRefreshComplete',
+                                    { success: data.success, processed: data.processed, type: displayName },
+                                    `Completed: updated ${data.success} of ${data.processed} ${displayName}s`
+                                ));
+                                resolve(data);
+                                break;
+                            }
+
+                            case 'cancelled':
+                                loading.setStatus(translate('toast.api.operationCancelled', {}, 'Operation cancelled by user'));
+                                resolve(data);
+                                break;
+
+                            case 'rate_limited':
+                                reject(new Error(translate(
+                                    'toast.api.statsRefreshRateLimited',
+                                    {},
+                                    'Civitai rate limit reached; try again later'
+                                )));
+                                break;
+
+                            case 'error':
+                                reject(new Error(data.error));
+                                break;
+                        }
+                    };
+
+                    ws.onerror = (error) => {
+                        reject(new Error('WebSocket error: ' + error.message));
+                    };
+                });
+
+                const response = await fetch(
+                    `${this.apiConfig.endpoints.refreshCivitaiStats}?${params}`,
+                    { method: 'POST' }
+                );
+
+                if (!response.ok) {
+                    throw new Error(response.statusText || 'Failed to refresh stats');
+                }
+
+                const finalData = await operationComplete;
+
+                await resetAndReload(false);
+
+                if (finalData && finalData.status !== 'cancelled') {
+                    showToast(
+                        'toast.api.statsRefreshSuccess',
+                        { success: finalData.success, type: displayName },
+                        'success',
+                        `Updated stats for ${finalData.success} ${displayName}s`
+                    );
+                }
+            } catch (error) {
+                console.error('Error refreshing Civitai stats:', error);
+                showToast('toast.api.statsRefreshFailed', { message: error.message }, 'error', `Failed to refresh stats: ${error.message}`);
+            } finally {
+                if (ws) {
+                    ws.close();
+                }
+            }
+        }, {
+            initialMessage: translate('toast.api.statsRefreshConnecting', {}, 'Connecting...'),
+            completionMessage: translate('toast.api.statsRefreshDone', {}, 'Stats update complete')
         });
     }
 

@@ -34,6 +34,7 @@ from ...services.use_cases import (
     DownloadModelUseCase,
     DownloadModelValidationError,
     MetadataRefreshProgressReporter,
+    RefreshModelStatsUseCase,
 )
 from ...services.websocket_manager import WebSocketManager
 from ...services.websocket_progress_callback import WebSocketProgressCallback
@@ -42,6 +43,10 @@ from ...services.errors import RateLimitError, ResourceNotFoundError
 from ...utils.civitai_utils import resolve_license_payload
 from ...utils.file_utils import calculate_sha256
 from ...utils.metadata_manager import MetadataManager
+
+# A scoped stats refresh acts on the whole filtered set rather than one page,
+# so it asks get_paginated_data for a single page large enough to hold it.
+SCOPED_REFRESH_PAGE_SIZE = 1_000_000
 
 LICENSE_FIELDS = (
     "allowNoCredit",
@@ -910,6 +915,46 @@ class ModelManagementHandler:
             self._logger.error("Error saving metadata: %s", exc, exc_info=True)
             return web.Response(text=str(exc), status=500)
 
+    async def pin_version(self, request: web.Request) -> web.Response:
+        """Pin one version as the representative of its model group.
+
+        The pin is exclusive: any sibling version that was previously pinned is
+        cleared in the same request, so a group can never end up with two
+        representatives competing in the grouped view.
+        """
+        try:
+            data = await request.json()
+            file_path = data.get("file_path")
+            if not file_path:
+                return web.Response(text="File path is required", status=400)
+
+            pinned = bool(data.get("pinned", True))
+
+            async def write(path: str, value: bool) -> None:
+                await self._metadata_sync.save_metadata_updates(
+                    file_path=path,
+                    updates={"pinned": value},
+                    metadata_loader=self._metadata_sync.load_local_metadata,
+                    update_cache=self._service.scanner.update_single_model_cache,
+                )
+
+            unpinned: List[str] = []
+            if pinned:
+                for sibling in await self._service.find_group_siblings(file_path):
+                    sibling_path = sibling.get("file_path")
+                    if sibling_path and sibling_path != file_path and sibling.get("pinned"):
+                        await write(sibling_path, False)
+                        unpinned.append(sibling_path)
+
+            await write(file_path, pinned)
+
+            return web.json_response(
+                {"success": True, "pinned": pinned, "unpinned": unpinned}
+            )
+        except Exception as exc:
+            self._logger.error("Error pinning version: %s", exc, exc_info=True)
+            return web.Response(text=str(exc), status=500)
+
     async def add_tags(self, request: web.Request) -> web.Response:
         try:
             data = await request.json()
@@ -1372,6 +1417,46 @@ class ModelQueryHandler:
         except Exception as exc:
             self._logger.error(
                 "Error getting %s notes: %s",
+                self._service.model_type,
+                exc,
+                exc_info=True,
+            )
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+    async def get_model_favorite(self, request: web.Request) -> web.Response:
+        """Report favorite state for a model, looked up by name.
+
+        The ComfyUI widgets only ever know a model by the name stored in the
+        workflow, while every metadata write is keyed on ``file_path``. This
+        resolves one to the other in a single request, so a context menu can
+        label itself correctly and then toggle through ``save-metadata``.
+        """
+        try:
+            model_name = request.query.get("name")
+            if not model_name:
+                return web.Response(
+                    text=f"{self._service.model_type.capitalize()} file name is required",
+                    status=400,
+                )
+            model = await self._service.get_model_info_by_name(model_name)
+            if not model:
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": f"{self._service.model_type.capitalize()} not found in cache",
+                    },
+                    status=404,
+                )
+            return web.json_response(
+                {
+                    "success": True,
+                    "favorite": bool(model.get("favorite", False)),
+                    "file_path": model.get("file_path", ""),
+                }
+            )
+        except Exception as exc:
+            self._logger.error(
+                "Error getting %s favorite state: %s",
                 self._service.model_type,
                 exc,
                 exc_info=True,
@@ -2097,6 +2182,8 @@ class ModelCivitaiHandler:
         metadata_sync: MetadataSyncService,
         metadata_refresh_use_case: BulkMetadataRefreshUseCase,
         metadata_progress_callback: MetadataRefreshProgressReporter,
+        stats_refresh_use_case: RefreshModelStatsUseCase,
+        parse_list_params: Callable[[web.Request], Dict[str, Any]],
     ) -> None:
         self._service = service
         self._settings = settings_service
@@ -2109,6 +2196,8 @@ class ModelCivitaiHandler:
         self._metadata_sync = metadata_sync
         self._metadata_refresh_use_case = metadata_refresh_use_case
         self._metadata_progress_callback = metadata_progress_callback
+        self._stats_refresh_use_case = stats_refresh_use_case
+        self._parse_list_params = parse_list_params
 
     async def fetch_all_civitai(self, request: web.Request) -> web.Response:
         try:
@@ -2123,6 +2212,65 @@ class ModelCivitaiHandler:
                 exc_info=True,
             )
             return web.Response(text=str(exc), status=500)
+
+    async def refresh_civitai_stats(self, request: web.Request) -> web.Response:
+        """Refresh Civitai stats for every model matching the request's filters.
+
+        Filters arrive as a query string using the same parameters as the list
+        endpoint, so the refreshed set is resolved by the very same query that
+        produced the grid the user is looking at.
+        """
+        try:
+            params = self._parse_list_params(request)
+        except Exception as exc:
+            self._logger.error("Invalid stats refresh filters: %s", exc)
+            return web.json_response(
+                {"success": False, "error": f"Invalid filters: {exc}"}, status=400
+            )
+
+        # The list endpoint caps page_size at 100; the refresh scope is the whole
+        # filtered set, so page through it in one go.
+        params["page"] = 1
+        params["page_size"] = SCOPED_REFRESH_PAGE_SIZE
+
+        metadata_provider = await self._metadata_provider_factory()
+        if metadata_provider is None:
+            return web.json_response(
+                {"success": False, "error": "Civitai provider not available"},
+                status=503,
+            )
+
+        try:
+            result = await self._service.get_paginated_data(**params)
+            models = result.get("items") or []
+
+            refresh_result = await self._stats_refresh_use_case.execute_with_error_handling(
+                models=models,
+                metadata_provider=metadata_provider,
+                progress_callback=self._metadata_progress_callback,
+            )
+        except RateLimitError as exc:
+            return web.json_response(
+                {"success": False, "error": str(exc) or "Rate limited"}, status=429
+            )
+        except Exception as exc:
+            if is_expected_offline_error(str(exc)):
+                return web.json_response(
+                    {"success": False, "error": OFFLINE_FRIENDLY_MESSAGE},
+                    status=503,
+                )
+            self._logger.error(
+                "Error refreshing Civitai stats for %ss: %s",
+                self._service.model_type,
+                exc,
+                exc_info=True,
+            )
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+        if self._service.scanner.is_cancelled():
+            refresh_result = dict(refresh_result)
+            refresh_result["status"] = "cancelled"
+        return web.json_response(refresh_result)
 
     async def get_civitai_versions(self, request: web.Request) -> web.Response:
         try:
@@ -3122,10 +3270,12 @@ class ModelHandlerSet:
             "unexclude_model": self.management.unexclude_model,
             "fetch_civitai": self.management.fetch_civitai,
             "fetch_all_civitai": self.civitai.fetch_all_civitai,
+            "refresh_civitai_stats": self.civitai.refresh_civitai_stats,
             "relink_civitai": self.management.relink_civitai,
             "replace_preview": self.management.replace_preview,
             "set_preview_from_url": self.management.set_preview_from_url,
             "save_metadata": self.management.save_metadata,
+            "pin_version": self.management.pin_version,
             "add_tags": self.management.add_tags,
             "rename_model": self.management.rename_model,
             "bulk_delete_models": self.management.bulk_delete_models,
@@ -3170,6 +3320,7 @@ class ModelHandlerSet:
             "auto_organize_models": self.auto_organize.auto_organize_models,
             "get_auto_organize_progress": self.auto_organize.get_auto_organize_progress,
             "get_model_notes": self.query.get_model_notes,
+            "get_model_favorite": self.query.get_model_favorite,
             "get_model_preview_url": self.query.get_model_preview_url,
             "get_model_civitai_url": self.query.get_model_civitai_url,
             "get_model_metadata": self.query.get_model_metadata,

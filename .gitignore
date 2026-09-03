@@ -41,3 +41,6 @@ vue-widgets/dist/
 # HF enrichment validation baseline snapshots (contain potentially
 # NSFW README content fetched from community model repos)
 tests/enrich_hf_validation/baselines/
+
+# Local Python virtual environment
+.venv/

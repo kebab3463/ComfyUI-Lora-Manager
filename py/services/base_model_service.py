@@ -20,6 +20,7 @@ from .model_query import (
     normalize_sub_type,
     resolve_sub_type,
 )
+from .model_cache import get_civitai_stat
 from .settings_manager import get_settings_manager
 from ..utils.civitai_utils import build_civitai_model_page_url
 
@@ -122,7 +123,8 @@ class BaseModelService(ABC):
                 reverse=True,
             )
 
-        # Optionally group by civitai modelId, showing only the latest version per model
+        # Optionally group by civitai modelId, showing one version per model:
+        # the pinned one when the user has chosen it, else the latest.
         dedup_lost = 0
         if kwargs.get("group_by_model") and civitai_model_id is None:
             # Determine whether to further sub-group by base model
@@ -133,7 +135,7 @@ class BaseModelService(ABC):
             ufs = self.settings.get("version_grouping", "same_base")
             group_by_base = ufs == "same_base"
 
-            dedup_map = {}  # (modelId [,base_model]) -> (item, version_or_modified)
+            dedup_map = {}  # (modelId [,base_model]) -> (item, rank)
             version_counter = {}  # same-key -> count
             standalone = []
             for item in sorted_data:
@@ -148,14 +150,17 @@ class BaseModelService(ABC):
                 vid = self._extract_version_id(item)
                 if vid is None:
                     vid = item.get("modified", 0) or 0
-                if key not in dedup_map or vid > dedup_map[key][1]:
-                    dedup_map[key] = (item, vid)
+                # A pinned version always represents its group; among unpinned
+                # versions (or several pinned ones) the newest still wins.
+                rank = (1 if item.get("pinned") else 0, vid)
+                if key not in dedup_map or rank > dedup_map[key][1]:
+                    dedup_map[key] = (item, rank)
             # Attach version_count to each surviving grouped item (shallow copy
             # to avoid mutating cached dicts — the cache is shared across requests)
-            for key, (item, vid) in dedup_map.items():
+            for key, (item, rank) in dedup_map.items():
                 item = dict(item)
                 item["version_count"] = version_counter[key]
-                dedup_map[key] = (item, vid)
+                dedup_map[key] = (item, rank)
             dedup_lost = len(sorted_data) - (len(dedup_map) + len(standalone))
             sorted_data = [entry[0] for entry in dedup_map.values()] + standalone
 
@@ -406,6 +411,13 @@ class BaseModelService(ABC):
         elif key_name == "usage":
             key_fn = lambda item: (
                 int(item.get("usage_count", 0) or 0),
+                (item.get("model_name") or item.get("file_name") or "").lower(),
+                item.get("file_path", "").lower(),
+            )
+        elif key_name in ("likes", "downloads"):
+            stat_key = "thumbsUpCount" if key_name == "likes" else "downloadCount"
+            key_fn = lambda item: (
+                get_civitai_stat(item, stat_key),
                 (item.get("model_name") or item.get("file_name") or "").lower(),
                 item.get("file_path", "").lower(),
             )
@@ -752,6 +764,41 @@ class BaseModelService(ABC):
             return None
         return f"hf:{m.group(1)}"
 
+    async def find_group_siblings(self, file_path: str) -> List[Dict[str, Any]]:
+        """Return every cached version grouped with *file_path*, itself included.
+
+        The grouping key matches the one ``get_paginated_data`` dedups on, so a
+        pin applies to exactly the group whose card the user is looking at.
+        Returns an empty list when the model is unknown or has no group
+        identity (a standalone model is always its own representative).
+        """
+        cache = await self.scanner.get_cached_data()
+
+        target = next(
+            (
+                item
+                for item in cache.raw_data
+                if item.get("file_path") == file_path
+            ),
+            None,
+        )
+        if target is None:
+            return []
+
+        group_key = self._extract_group_key(target)
+        if group_key is None:
+            return []
+
+        group_by_base = self.settings.get("version_grouping", "same_base") == "same_base"
+        target_base = target.get("base_model") or ""
+
+        return [
+            item
+            for item in cache.raw_data
+            if self._extract_group_key(item) == group_key
+            and (not group_by_base or (item.get("base_model") or "") == target_base)
+        ]
+
     @staticmethod
     def _extract_group_key(item: Dict[str, Any]) -> Union[int, str, None]:
         """Return the group identity key: CivitAI modelId (int) or HF repo (str).
@@ -952,12 +999,13 @@ class BaseModelService(ABC):
             return {}
 
         fields = (
-            ["id", "modelId", "name", "trainedWords"]
+            ["id", "modelId", "name", "trainedWords", "stats", "publishedAt"]
             if minimal
             else [
                 "id",
                 "modelId",
                 "name",
+                "stats",
                 "createdAt",
                 "updatedAt",
                 "publishedAt",

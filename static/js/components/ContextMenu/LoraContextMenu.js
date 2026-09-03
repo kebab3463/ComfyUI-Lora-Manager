@@ -25,6 +25,7 @@ export class LoraContextMenu extends BaseContextMenu {
         super.showMenu(x, y, card);
         this.updateExcludeMenuItem();
         this.updateEnrichMenuItem(card);
+        this.updatePinMenuItem(card);
     }
 
     updateEnrichMenuItem(card) {

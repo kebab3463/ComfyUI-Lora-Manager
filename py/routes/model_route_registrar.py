@@ -28,12 +28,16 @@ COMMON_ROUTE_DEFINITIONS: tuple[RouteDefinition, ...] = (
     RouteDefinition("POST", "/api/lm/{prefix}/unexclude", "unexclude_model"),
     RouteDefinition("POST", "/api/lm/{prefix}/fetch-civitai", "fetch_civitai"),
     RouteDefinition("POST", "/api/lm/{prefix}/fetch-all-civitai", "fetch_all_civitai"),
+    RouteDefinition(
+        "POST", "/api/lm/{prefix}/refresh-civitai-stats", "refresh_civitai_stats"
+    ),
     RouteDefinition("POST", "/api/lm/{prefix}/relink-civitai", "relink_civitai"),
     RouteDefinition("POST", "/api/lm/{prefix}/replace-preview", "replace_preview"),
     RouteDefinition(
         "POST", "/api/lm/{prefix}/set-preview-from-url", "set_preview_from_url"
     ),
     RouteDefinition("POST", "/api/lm/{prefix}/save-metadata", "save_metadata"),
+    RouteDefinition("POST", "/api/lm/{prefix}/pin-version", "pin_version"),
     RouteDefinition("POST", "/api/lm/{prefix}/add-tags", "add_tags"),
     RouteDefinition("POST", "/api/lm/{prefix}/rename", "rename_model"),
     RouteDefinition("POST", "/api/lm/{prefix}/bulk-delete", "bulk_delete_models"),
@@ -61,6 +65,7 @@ COMMON_ROUTE_DEFINITIONS: tuple[RouteDefinition, ...] = (
         "GET", "/api/lm/{prefix}/find-filename-conflicts", "find_filename_conflicts"
     ),
     RouteDefinition("GET", "/api/lm/{prefix}/get-notes", "get_model_notes"),
+    RouteDefinition("GET", "/api/lm/{prefix}/favorite", "get_model_favorite"),
     RouteDefinition("GET", "/api/lm/{prefix}/preview-url", "get_model_preview_url"),
     RouteDefinition("GET", "/api/lm/{prefix}/civitai-url", "get_model_civitai_url"),
     RouteDefinition("GET", "/api/lm/{prefix}/metadata", "get_model_metadata"),

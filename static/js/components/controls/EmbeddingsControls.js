@@ -38,6 +38,10 @@ export class EmbeddingsControls extends PageControls {
             fetchFromCivitai: async () => {
                 return await getModelApiClient().fetchCivitaiMetadata();
             },
+
+            refreshCivitaiStats: async () => {
+                return await getModelApiClient().refreshCivitaiStats();
+            },
             
             // Add show download modal functionality
             showDownloadModal: () => {

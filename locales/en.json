@@ -147,9 +147,23 @@
     "usage": {
       "timesUsed": "Times used"
     },
+    "stats": {
+      "likes": "Civitai likes",
+      "downloads": "Civitai downloads"
+    },
     "footer": {
       "versionCount": "{count} versions",
       "viewAllVersions": "View all local versions"
+    },
+    "uploaded": {
+      "title": "Uploaded to Civitai",
+      "thisMonth": "this month",
+      "months": "{{count}}mo ago",
+      "years": "{{years}}y ago",
+      "yearsMonths": "{{years}}y {{months}}mo ago"
+    },
+    "pinned": {
+      "title": "Pinned version for this model"
     }
   },
   "globalContextMenu": {
@@ -736,6 +750,12 @@
         "versionsCountDesc": "Most versions first",
         "versionsCountAsc": "Fewest versions first",
         "versionIdDesc": "Newest version first",
+        "likes": "Civitai Likes",
+        "likesDesc": "Most liked",
+        "likesAsc": "Least liked",
+        "downloads": "Civitai Downloads",
+        "downloadsDesc": "Most downloaded",
+        "downloadsAsc": "Least downloaded",
         "random": "Random",
         "randomAction": "Randomize (shuffle)"
       },
@@ -746,7 +766,10 @@
       },
       "fetch": {
         "title": "Fetch metadata from Civitai",
-        "action": "Fetch"
+        "action": "Fetch",
+        "menuLabel": "Show fetch options",
+        "stats": "Fetch Civitai Stats",
+        "statsTooltip": "Fetch Civitai like and download counts for the models currently listed."
       },
       "download": {
         "title": "Download from URL",
@@ -847,7 +870,11 @@
       "viewAllLoras": "View All LoRAs",
       "downloadMissingLoras": "Download Missing LoRAs",
       "deleteRecipe": "Delete Recipe",
-      "enrichHfAgent": "Enrich HF Metadata (AI)"
+      "enrichHfAgent": "Enrich HF Metadata (AI)",
+      "pinVersion": "Pin this version",
+      "unpinVersion": "Unpin version",
+      "pinVersionTooltip": "Show this version on the grouped card instead of the latest one",
+      "pinVersionUngroupable": "This model has no Civitai or HuggingFace group to pin within"
     }
   },
   "recipes": {
@@ -1328,6 +1355,12 @@
       "message": "This checks every {typePlural} in your library for updates. Large collections may take a little longer.",
       "tip": "To work in smaller batches, switch to bulk mode, choose the ones you need, then use \"Check Updates for Selected\".",
       "action": "Check All"
+    },
+    "refreshStats": {
+      "title": "Fetch Civitai stats for {count} {typePlural}?",
+      "message": "This fetches like and download counts for the {count} {typePlural} matching your current folder and filters.",
+      "tip": "To fetch fewer, narrow the folder or search first — only what is currently listed gets updated.",
+      "action": "Fetch Stats"
     },
     "bulkAddTags": {
       "title": "Add Tags to Multiple Models",
@@ -2054,7 +2087,10 @@
       "tagsAddFailed": "Failed to add tags to {count} model(s)",
       "tagsReplaceFailed": "Failed to replace tags for {count} model(s)",
       "bulkTagsAddFailed": "Failed to add tags to models",
-      "bulkTagsReplaceFailed": "Failed to replace tags for models"
+      "bulkTagsReplaceFailed": "Failed to replace tags for models",
+      "versionPinned": "Version pinned - it now represents this model when grouping is on",
+      "versionUnpinned": "Version unpinned - the latest version represents this model again",
+      "versionPinFailed": "Failed to pin version: {message}"
     },
     "search": {
       "atLeastOneOption": "At least one search option must be selected"
@@ -2156,7 +2192,8 @@
       "reloadFailed": "Failed to reload {pageType}: {message}",
       "refreshFailed": "Failed to {action} {pageType}: {message}",
       "fetchMetadataFailed": "Failed to fetch metadata: {message}",
-      "clearFilterFailed": "Failed to clear custom filter: {message}"
+      "clearFilterFailed": "Failed to clear custom filter: {message}",
+      "statsRefreshFailed": "Failed to refresh Civitai stats: {message}"
     },
     "contextMenu": {
       "contentRatingSet": "Content rating set to {level}",
@@ -2226,7 +2263,16 @@
       "exampleImagesDownloadFailed": "Failed to download example images: {message}",
       "moveFailed": "Failed to move item: {message}",
       "copiedToClipboard": "Copied to clipboard",
-      "downloadStarted": "Download started"
+      "downloadStarted": "Download started",
+      "statsRefreshEmpty": "No models match the current filters",
+      "statsRefreshStarting": "Starting stats fetch...",
+      "statsRefreshProgress": "Processing ({processed}/{total})",
+      "statsRefreshComplete": "Completed: updated {success} of {processed} {type}s",
+      "statsRefreshRateLimited": "Civitai rate limit reached; try again later",
+      "statsRefreshSuccess": "Updated stats for {success} {type}s",
+      "statsRefreshFailed": "Failed to refresh stats: {message}",
+      "statsRefreshConnecting": "Connecting...",
+      "statsRefreshDone": "Stats update complete"
     },
     "agent": {
       "llmNotConfigured": "AI provider not configured. Enable it in Settings → AI Provider.",

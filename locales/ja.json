@@ -147,9 +147,23 @@
         "usage": {
             "timesUsed": "使用回数"
         },
+        "stats": {
+            "likes": "[TODO: Translate] Civitai likes",
+            "downloads": "[TODO: Translate] Civitai downloads"
+        },
         "footer": {
             "versionCount": "{count} バージョン",
             "viewAllVersions": "ローカルの全バージョンを表示"
+        },
+        "uploaded": {
+            "title": "[TODO: Translate] Uploaded to Civitai",
+            "thisMonth": "[TODO: Translate] this month",
+            "months": "[TODO: Translate] {{count}}mo ago",
+            "years": "[TODO: Translate] {{years}}y ago",
+            "yearsMonths": "[TODO: Translate] {{years}}y {{months}}mo ago"
+        },
+        "pinned": {
+            "title": "[TODO: Translate] Pinned as this model's version"
         }
     },
     "globalContextMenu": {
@@ -736,6 +750,12 @@
                 "versionsCountDesc": "バージョン数の多い順",
                 "versionsCountAsc": "バージョン数の少ない順",
                 "versionIdDesc": "最新バージョン順",
+                "likes": "[TODO: Translate] Civitai Likes",
+                "likesDesc": "[TODO: Translate] Most liked",
+                "likesAsc": "[TODO: Translate] Least liked",
+                "downloads": "[TODO: Translate] Civitai Downloads",
+                "downloadsDesc": "[TODO: Translate] Most downloaded",
+                "downloadsAsc": "[TODO: Translate] Least downloaded",
                 "random": "ランダム",
                 "randomAction": "シャッフル（ランダム）"
             },
@@ -746,7 +766,10 @@
             },
             "fetch": {
                 "title": "Civitaiからメタデータを取得",
-                "action": "取得"
+                "action": "取得",
+                "menuLabel": "[TODO: Translate] Show fetch options",
+                "stats": "[TODO: Translate] Fetch Civitai Stats",
+                "statsTooltip": "[TODO: Translate] Fetch Civitai like and download counts for the models currently listed."
             },
             "download": {
                 "title": "URLからダウンロード",
@@ -847,7 +870,11 @@
             "viewAllLoras": "すべてのLoRAを表示",
             "downloadMissingLoras": "不足しているLoRAをダウンロード",
             "deleteRecipe": "レシピを削除",
-            "enrichHfAgent": "HF メタデータをAIで補完"
+            "enrichHfAgent": "HF メタデータをAIで補完",
+            "pinVersion": "[TODO: Translate] Pin this version",
+            "unpinVersion": "[TODO: Translate] Unpin version",
+            "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
         }
     },
     "recipes": {
@@ -1328,6 +1355,12 @@
             "message": "ライブラリ内のすべての{type}で更新を確認します。コレクションが大きい場合は時間がかかることがあります。",
             "tip": "少しずつ確認したい場合はバルクモードに切り替え、必要なモデルを選んで「選択項目の更新を確認」を使ってください。",
             "action": "すべて確認"
+        },
+        "refreshStats": {
+            "title": "[TODO: Translate] Fetch Civitai stats for {count} {typePlural}?",
+            "message": "[TODO: Translate] This fetches like and download counts for the {count} {typePlural} matching your current folder and filters.",
+            "tip": "[TODO: Translate] To fetch fewer, narrow the folder or search first — only what is currently listed gets updated.",
+            "action": "[TODO: Translate] Fetch Stats"
         },
         "bulkAddTags": {
             "title": "複数モデルにタグを追加",
@@ -2054,7 +2087,10 @@
             "tagsAddFailed": "{count} モデルへのタグ追加に失敗しました",
             "tagsReplaceFailed": "{count} モデルのタグ置換に失敗しました",
             "bulkTagsAddFailed": "モデルへのタグ追加に失敗しました",
-            "bulkTagsReplaceFailed": "モデルのタグ置換に失敗しました"
+            "bulkTagsReplaceFailed": "モデルのタグ置換に失敗しました",
+            "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
+            "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
         },
         "search": {
             "atLeastOneOption": "少なくとも1つの検索オプションを選択する必要があります"
@@ -2156,7 +2192,8 @@
             "reloadFailed": "{pageType}の再読み込みに失敗しました：{message}",
             "refreshFailed": "{pageType}の{action}に失敗しました：{message}",
             "fetchMetadataFailed": "メタデータの取得に失敗しました：{message}",
-            "clearFilterFailed": "カスタムフィルタのクリアに失敗しました：{message}"
+            "clearFilterFailed": "カスタムフィルタのクリアに失敗しました：{message}",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh Civitai stats: {message}"
         },
         "contextMenu": {
             "contentRatingSet": "コンテンツレーティングが {level} に設定されました",
@@ -2226,7 +2263,16 @@
             "exampleImagesDownloadFailed": "例画像のダウンロードに失敗しました：{message}",
             "moveFailed": "Failed to move item: {message}",
             "copiedToClipboard": "クリップボードにコピーしました",
-            "downloadStarted": "ダウンロードを開始しました"
+            "downloadStarted": "ダウンロードを開始しました",
+            "statsRefreshEmpty": "[TODO: Translate] No models match the current filters",
+            "statsRefreshStarting": "[TODO: Translate] Starting stats fetch...",
+            "statsRefreshProgress": "[TODO: Translate] Processing ({processed}/{total})",
+            "statsRefreshComplete": "[TODO: Translate] Completed: updated {success} of {processed} {type}s",
+            "statsRefreshRateLimited": "[TODO: Translate] Civitai rate limit reached; try again later",
+            "statsRefreshSuccess": "[TODO: Translate] Updated stats for {success} {type}s",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh stats: {message}",
+            "statsRefreshConnecting": "[TODO: Translate] Connecting...",
+            "statsRefreshDone": "[TODO: Translate] Stats update complete"
         },
         "agent": {
             "llmNotConfigured": "AIプロバイダーが設定されていません。設定 → AIプロバイダーで有効にしてください。",

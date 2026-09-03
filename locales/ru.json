@@ -147,9 +147,23 @@
         "usage": {
             "timesUsed": "Количество использований"
         },
+        "stats": {
+            "likes": "[TODO: Translate] Civitai likes",
+            "downloads": "[TODO: Translate] Civitai downloads"
+        },
         "footer": {
             "versionCount": "{count} версий",
             "viewAllVersions": "Показать все локальные версии"
+        },
+        "uploaded": {
+            "title": "[TODO: Translate] Uploaded to Civitai",
+            "thisMonth": "[TODO: Translate] this month",
+            "months": "[TODO: Translate] {{count}}mo ago",
+            "years": "[TODO: Translate] {{years}}y ago",
+            "yearsMonths": "[TODO: Translate] {{years}}y {{months}}mo ago"
+        },
+        "pinned": {
+            "title": "[TODO: Translate] Pinned as this model's version"
         }
     },
     "globalContextMenu": {
@@ -736,6 +750,12 @@
                 "versionsCountDesc": "Сначала больше версий",
                 "versionsCountAsc": "Сначала меньше версий",
                 "versionIdDesc": "Сначала новые версии",
+                "likes": "[TODO: Translate] Civitai Likes",
+                "likesDesc": "[TODO: Translate] Most liked",
+                "likesAsc": "[TODO: Translate] Least liked",
+                "downloads": "[TODO: Translate] Civitai Downloads",
+                "downloadsDesc": "[TODO: Translate] Most downloaded",
+                "downloadsAsc": "[TODO: Translate] Least downloaded",
                 "random": "Случайно",
                 "randomAction": "Перемешать"
             },
@@ -746,7 +766,10 @@
             },
             "fetch": {
                 "title": "Получить метаданные с Civitai",
-                "action": "Получить"
+                "action": "Получить",
+                "menuLabel": "[TODO: Translate] Show fetch options",
+                "stats": "[TODO: Translate] Fetch Civitai Stats",
+                "statsTooltip": "[TODO: Translate] Fetch Civitai like and download counts for the models currently listed."
             },
             "download": {
                 "title": "Загрузить по URL",
@@ -847,7 +870,11 @@
             "viewAllLoras": "Посмотреть все LoRAs",
             "downloadMissingLoras": "Загрузить отсутствующие LoRAs",
             "deleteRecipe": "Удалить рецепт",
-            "enrichHfAgent": "Обогатить HF метаданные (ИИ)"
+            "enrichHfAgent": "Обогатить HF метаданные (ИИ)",
+            "pinVersion": "[TODO: Translate] Pin this version",
+            "unpinVersion": "[TODO: Translate] Unpin version",
+            "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
         }
     },
     "recipes": {
@@ -1328,6 +1355,12 @@
             "message": "Будут проверены обновления для всех {typePlural} в вашей библиотеке. Для больших коллекций это может занять немного больше времени.",
             "tip": "Хотите проверять по частям? Переключитесь в массовый режим, выберите нужные модели и используйте \"Проверить обновления для выбранных\".",
             "action": "Проверить всё"
+        },
+        "refreshStats": {
+            "title": "[TODO: Translate] Fetch Civitai stats for {count} {typePlural}?",
+            "message": "[TODO: Translate] This fetches like and download counts for the {count} {typePlural} matching your current folder and filters.",
+            "tip": "[TODO: Translate] To fetch fewer, narrow the folder or search first — only what is currently listed gets updated.",
+            "action": "[TODO: Translate] Fetch Stats"
         },
         "bulkAddTags": {
             "title": "Добавить теги к нескольким моделям",
@@ -2054,7 +2087,10 @@
             "tagsAddFailed": "Не удалось добавить теги к {count} модель(ям)",
             "tagsReplaceFailed": "Не удалось заменить теги для {count} модель(ей)",
             "bulkTagsAddFailed": "Не удалось добавить теги к моделям",
-            "bulkTagsReplaceFailed": "Не удалось заменить теги для моделей"
+            "bulkTagsReplaceFailed": "Не удалось заменить теги для моделей",
+            "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
+            "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
         },
         "search": {
             "atLeastOneOption": "Должен быть выбран хотя бы один вариант поиска"
@@ -2156,7 +2192,8 @@
             "reloadFailed": "Не удалось перезагрузить {pageType}: {message}",
             "refreshFailed": "Не удалось {action} {pageType}: {message}",
             "fetchMetadataFailed": "Не удалось получить метаданные: {message}",
-            "clearFilterFailed": "Не удалось очистить пользовательский фильтр: {message}"
+            "clearFilterFailed": "Не удалось очистить пользовательский фильтр: {message}",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh Civitai stats: {message}"
         },
         "contextMenu": {
             "contentRatingSet": "Рейтинг контента установлен на {level}",
@@ -2226,7 +2263,16 @@
             "exampleImagesDownloadFailed": "Не удалось загрузить примеры изображений: {message}",
             "moveFailed": "Failed to move item: {message}",
             "copiedToClipboard": "Скопировано в буфер обмена",
-            "downloadStarted": "Загрузка начата"
+            "downloadStarted": "Загрузка начата",
+            "statsRefreshEmpty": "[TODO: Translate] No models match the current filters",
+            "statsRefreshStarting": "[TODO: Translate] Starting stats fetch...",
+            "statsRefreshProgress": "[TODO: Translate] Processing ({processed}/{total})",
+            "statsRefreshComplete": "[TODO: Translate] Completed: updated {success} of {processed} {type}s",
+            "statsRefreshRateLimited": "[TODO: Translate] Civitai rate limit reached; try again later",
+            "statsRefreshSuccess": "[TODO: Translate] Updated stats for {success} {type}s",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh stats: {message}",
+            "statsRefreshConnecting": "[TODO: Translate] Connecting...",
+            "statsRefreshDone": "[TODO: Translate] Stats update complete"
         },
         "agent": {
             "llmNotConfigured": "Поставщик ИИ не настроен. Включите его в Настройки → Поставщик ИИ.",

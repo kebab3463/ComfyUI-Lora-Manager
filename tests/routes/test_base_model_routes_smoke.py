@@ -262,6 +262,94 @@ def test_model_types_endpoint_returns_counts(mock_service, mock_scanner):
     asyncio.run(scenario())
 
 
+def test_favorite_endpoint_resolves_name_to_state_and_path(mock_service, mock_scanner):
+    """The ComfyUI widgets know a name; every metadata write needs a path."""
+    seen = []
+
+    async def fake_lookup(name):
+        seen.append(name)
+        return {
+            "favorite": True,
+            "file_path": "/models/loras/characters/mianne.safetensors",
+        }
+
+    mock_service.get_model_info_by_name = fake_lookup
+
+    async def scenario():
+        client = await create_test_client(mock_service)
+        try:
+            response = await client.get(
+                "/api/lm/test-models/favorite?name=characters%2Fmianne"
+            )
+            payload = await response.json()
+
+            assert response.status == 200
+            assert payload == {
+                "success": True,
+                "favorite": True,
+                "file_path": "/models/loras/characters/mianne.safetensors",
+            }
+            assert seen == ["characters/mianne"]
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_favorite_endpoint_defaults_to_not_favorited(mock_service, mock_scanner):
+    async def fake_lookup(_name):
+        return {"file_path": "/models/loras/mianne.safetensors"}
+
+    mock_service.get_model_info_by_name = fake_lookup
+
+    async def scenario():
+        client = await create_test_client(mock_service)
+        try:
+            response = await client.get("/api/lm/test-models/favorite?name=mianne")
+            payload = await response.json()
+
+            assert response.status == 200
+            assert payload["favorite"] is False
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_favorite_endpoint_requires_a_name(mock_service, mock_scanner):
+    async def scenario():
+        client = await create_test_client(mock_service)
+        try:
+            response = await client.get("/api/lm/test-models/favorite")
+            assert response.status == 400
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_favorite_endpoint_reports_a_model_missing_from_cache(
+    mock_service, mock_scanner
+):
+    async def fake_lookup(_name):
+        return None
+
+    mock_service.get_model_info_by_name = fake_lookup
+
+    async def scenario():
+        client = await create_test_client(mock_service)
+        try:
+            response = await client.get("/api/lm/test-models/favorite?name=nope")
+            payload = await response.json()
+
+            assert response.status == 404
+            assert payload["success"] is False
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
 def test_routes_return_service_not_ready_when_unattached():
     async def scenario():
         client = await create_test_client(None)
@@ -795,6 +883,109 @@ def test_download_model_returns_skipped_success(mock_service, download_manager_s
             assert payload["reason"] == "base_model_excluded"
             assert payload["base_model"] == "SDXL 1.0"
             assert payload["file_name"] == "demo.safetensors"
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_refresh_civitai_stats_scopes_to_current_filters(mock_service, mock_scanner):
+    """The refresh acts on everything matching the request's filters.
+
+    This is the core scoping guarantee: the handler must forward the parsed
+    filter state to the same query that builds the grid, and must not inherit
+    the list endpoint's 100-item page cap.
+    """
+    captured_params: dict[str, Any] = {}
+    captured_models: list[Any] = []
+
+    mock_service.paginated_items = [
+        {"file_path": f"/tmp/m{index}.safetensors", "sha256": f"{index:064x}"}
+        for index in range(150)
+    ]
+
+    original_get_paginated = mock_service.get_paginated_data
+
+    async def capturing_get_paginated(**params):
+        captured_params.update(params)
+        return await original_get_paginated(**params)
+
+    mock_service.get_paginated_data = capturing_get_paginated
+
+    class RecordingStatsUseCase:
+        async def execute_with_error_handling(self, *, models, metadata_provider, progress_callback):
+            captured_models.extend(models)
+            return {"success": True, "updated": len(models), "processed": len(models)}
+
+    class DummyProvider:
+        pass
+
+    async def scenario():
+        routes = DummyRoutes(mock_service)
+
+        async def provider_factory():
+            return DummyProvider()
+
+        routes._metadata_provider_factory = provider_factory
+        app = web.Application()
+        routes.setup_routes(app, "test-models")
+
+        # Handlers are built lazily behind a proxy; force construction so the
+        # stats use case can be swapped for a recording double.
+        routes._ensure_handler_mapping()
+        handler_set = routes._handler_set
+        assert handler_set is not None
+        handler_set.civitai._stats_refresh_use_case = RecordingStatsUseCase()
+
+        server = TestServer(app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/api/lm/test-models/refresh-civitai-stats"
+                "?folder=characters%2Fanime&search=miku&base_model=SDXL&favorites_only=true"
+            )
+            payload = await response.json()
+
+            assert response.status == 200
+            assert payload["success"] is True
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+    # Filters from the query string reached the query untouched.
+    assert captured_params["folder"] == "characters/anime"
+    assert captured_params["search"] == "miku"
+    assert captured_params["base_models"] == ["SDXL"]
+    assert captured_params["favorites_only"] is True
+
+    # The whole filtered set is requested in one page, not the list cap of 100.
+    assert captured_params["page"] == 1
+    assert captured_params["page_size"] > 150
+    assert len(captured_models) == 150
+
+
+def test_refresh_civitai_stats_returns_503_without_provider(mock_service, mock_scanner):
+    async def scenario():
+        routes = DummyRoutes(mock_service)
+
+        async def provider_factory():
+            return None
+
+        routes._metadata_provider_factory = provider_factory
+        app = web.Application()
+        routes.setup_routes(app, "test-models")
+
+        server = TestServer(app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            response = await client.post("/api/lm/test-models/refresh-civitai-stats")
+            payload = await response.json()
+
+            assert response.status == 503
+            assert payload["success"] is False
         finally:
             await client.close()
 

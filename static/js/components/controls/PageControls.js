@@ -294,6 +294,18 @@ export class PageControls {
             fetchButton.addEventListener('click', () => this.fetchFromCivitai());
         }
         
+        // Fetch Civitai stats for the models matching the current filters
+        const fetchStatsItem = document.querySelector('[data-action="fetch-stats"]');
+        if (fetchStatsItem) {
+            fetchStatsItem.addEventListener('click', (e) => {
+                e.stopPropagation();
+                // Close the dropdown before the confirmation modal opens,
+                // matching the other dropdown menu items.
+                document.querySelector('.dropdown-group.active')?.classList.remove('active');
+                this.refreshCivitaiStats();
+            });
+        }
+
         const downloadButton = document.querySelector('[data-action="download"]');
         if (downloadButton) {
             downloadButton.addEventListener('click', () => this.showDownloadModal());
@@ -466,6 +478,23 @@ export class PageControls {
         }
     }
     
+    /**
+     * Fetch Civitai stats for the models matching the current filters
+     */
+    async refreshCivitaiStats() {
+        if (!this.api?.refreshCivitaiStats) {
+            console.error('API methods not registered');
+            return;
+        }
+
+        try {
+            await this.api.refreshCivitaiStats();
+        } catch (error) {
+            console.error('Error refreshing Civitai stats:', error);
+            showToast('toast.controls.statsRefreshFailed', { message: error.message }, 'error');
+        }
+    }
+
     /**
      * Show download modal
      */

@@ -147,9 +147,23 @@
         "usage": {
             "timesUsed": "使用次數"
         },
+        "stats": {
+            "likes": "[TODO: Translate] Civitai likes",
+            "downloads": "[TODO: Translate] Civitai downloads"
+        },
         "footer": {
             "versionCount": "{count} 個版本",
             "viewAllVersions": "檢視所有本地版本"
+        },
+        "uploaded": {
+            "title": "[TODO: Translate] Uploaded to Civitai",
+            "thisMonth": "[TODO: Translate] this month",
+            "months": "[TODO: Translate] {{count}}mo ago",
+            "years": "[TODO: Translate] {{years}}y ago",
+            "yearsMonths": "[TODO: Translate] {{years}}y {{months}}mo ago"
+        },
+        "pinned": {
+            "title": "[TODO: Translate] Pinned as this model's version"
         }
     },
     "globalContextMenu": {
@@ -736,6 +750,12 @@
                 "versionsCountDesc": "版本數從多到少",
                 "versionsCountAsc": "版本數從少到多",
                 "versionIdDesc": "最新版本優先",
+                "likes": "[TODO: Translate] Civitai Likes",
+                "likesDesc": "[TODO: Translate] Most liked",
+                "likesAsc": "[TODO: Translate] Least liked",
+                "downloads": "[TODO: Translate] Civitai Downloads",
+                "downloadsDesc": "[TODO: Translate] Most downloaded",
+                "downloadsAsc": "[TODO: Translate] Least downloaded",
                 "random": "隨機",
                 "randomAction": "隨機排序（洗牌）"
             },
@@ -746,7 +766,10 @@
             },
             "fetch": {
                 "title": "從 Civitai 取得 metadata",
-                "action": "取得"
+                "action": "取得",
+                "menuLabel": "[TODO: Translate] Show fetch options",
+                "stats": "[TODO: Translate] Fetch Civitai Stats",
+                "statsTooltip": "[TODO: Translate] Fetch Civitai like and download counts for the models currently listed."
             },
             "download": {
                 "title": "從網址下載",
@@ -847,7 +870,11 @@
             "viewAllLoras": "檢視全部 LoRA",
             "downloadMissingLoras": "下載缺少的 LoRA",
             "deleteRecipe": "刪除配方",
-            "enrichHfAgent": "AI HF 中繼資料增強"
+            "enrichHfAgent": "AI HF 中繼資料增強",
+            "pinVersion": "[TODO: Translate] Pin this version",
+            "unpinVersion": "[TODO: Translate] Unpin version",
+            "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
         }
     },
     "recipes": {
@@ -1328,6 +1355,12 @@
             "message": "這會為資料庫中的每個 {type} 檢查更新，大型收藏可能會花上一些時間。",
             "tip": "想分批處理？切換到批次模式，選擇需要的模型，然後使用「檢查所選更新」。",
             "action": "全部檢查"
+        },
+        "refreshStats": {
+            "title": "[TODO: Translate] Fetch Civitai stats for {count} {typePlural}?",
+            "message": "[TODO: Translate] This fetches like and download counts for the {count} {typePlural} matching your current folder and filters.",
+            "tip": "[TODO: Translate] To fetch fewer, narrow the folder or search first — only what is currently listed gets updated.",
+            "action": "[TODO: Translate] Fetch Stats"
         },
         "bulkAddTags": {
             "title": "新增標籤到多個模型",
@@ -2054,7 +2087,10 @@
             "tagsAddFailed": "新增標籤到 {count} 個模型失敗",
             "tagsReplaceFailed": "取代 {count} 個模型的標籤失敗",
             "bulkTagsAddFailed": "批量新增標籤到模型失敗",
-            "bulkTagsReplaceFailed": "批量取代模型標籤失敗"
+            "bulkTagsReplaceFailed": "批量取代模型標籤失敗",
+            "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
+            "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
         },
         "search": {
             "atLeastOneOption": "至少需選擇一個搜尋選項"
@@ -2156,7 +2192,8 @@
             "reloadFailed": "重新載入 {pageType} 失敗：{message}",
             "refreshFailed": "刷新 {pageType} 失敗：{message}",
             "fetchMetadataFailed": "取得 metadata 失敗：{message}",
-            "clearFilterFailed": "清除自訂篩選失敗：{message}"
+            "clearFilterFailed": "清除自訂篩選失敗：{message}",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh Civitai stats: {message}"
         },
         "contextMenu": {
             "contentRatingSet": "內容分級已設為 {level}",
@@ -2226,7 +2263,16 @@
             "exampleImagesDownloadFailed": "下載範例圖片失敗：{message}",
             "moveFailed": "Failed to move item: {message}",
             "copiedToClipboard": "已複製到剪貼簿",
-            "downloadStarted": "下載已開始"
+            "downloadStarted": "下載已開始",
+            "statsRefreshEmpty": "[TODO: Translate] No models match the current filters",
+            "statsRefreshStarting": "[TODO: Translate] Starting stats fetch...",
+            "statsRefreshProgress": "[TODO: Translate] Processing ({processed}/{total})",
+            "statsRefreshComplete": "[TODO: Translate] Completed: updated {success} of {processed} {type}s",
+            "statsRefreshRateLimited": "[TODO: Translate] Civitai rate limit reached; try again later",
+            "statsRefreshSuccess": "[TODO: Translate] Updated stats for {success} {type}s",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh stats: {message}",
+            "statsRefreshConnecting": "[TODO: Translate] Connecting...",
+            "statsRefreshDone": "[TODO: Translate] Stats update complete"
         },
         "agent": {
             "llmNotConfigured": "AI 提供者尚未設定。請在 設定 → AI 提供者 中進行設定。",

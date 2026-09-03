@@ -251,6 +251,9 @@ class MockModelService:
     async def get_model_notes(self, *_args, **_kwargs):  # pragma: no cover
         return None
 
+    async def get_model_info_by_name(self, *_args, **_kwargs):  # pragma: no cover
+        return None
+
     async def get_model_preview_url(self, *_args, **_kwargs):  # pragma: no cover
         return ""
 

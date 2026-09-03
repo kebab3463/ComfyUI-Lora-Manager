@@ -60,6 +60,9 @@ class PersistentModelCache:
         "last_checked_at",
         "hash_status",
         "hf_url",
+        "civitai_stats",
+        "civitai_published_at",
+        "pinned",
     )
     _MODEL_UPDATE_COLUMNS: Tuple[str, ...] = _MODEL_COLUMNS[2:]
     _instances: Dict[str, "PersistentModelCache"] = {}
@@ -144,12 +147,21 @@ class PersistentModelCache:
                 except json.JSONDecodeError:
                     trained_words = []
 
+            civitai_stats = None
+            if row["civitai_stats"]:
+                try:
+                    decoded_stats = json.loads(row["civitai_stats"])
+                except json.JSONDecodeError:
+                    decoded_stats = None
+                if isinstance(decoded_stats, dict) and decoded_stats:
+                    civitai_stats = decoded_stats
+
             creator_username = row["civitai_creator_username"]
             civitai: Optional[Dict[str, Any]] = None
             civitai_has_data = any(
                 row[col] is not None
                 for col in ("civitai_id", "civitai_model_id", "civitai_model_type", "civitai_name")
-            ) or trained_words or creator_username
+            ) or trained_words or creator_username or civitai_stats or row["civitai_published_at"]
             if civitai_has_data:
                 civitai = {}
                 if row["civitai_id"] is not None:
@@ -165,6 +177,10 @@ class PersistentModelCache:
                 model_type_value = row["civitai_model_type"]
                 if model_type_value:
                     civitai.setdefault("model", {})["type"] = model_type_value
+                if civitai_stats:
+                    civitai["stats"] = civitai_stats
+                if row["civitai_published_at"]:
+                    civitai["publishedAt"] = row["civitai_published_at"]
 
             license_value = row["license_flags"]
             if license_value is None:
@@ -183,6 +199,7 @@ class PersistentModelCache:
                 "preview_nsfw_level": row["preview_nsfw_level"] or 0,
                 "from_civitai": bool(row["from_civitai"]),
                 "favorite": bool(row["favorite"]),
+                "pinned": bool(row["pinned"]),
                 "notes": row["notes"] or "",
                 "usage_tips": row["usage_tips"] or "",
                 "metadata_source": row["metadata_source"] or None,
@@ -582,6 +599,9 @@ class PersistentModelCache:
             "hash_status": "TEXT DEFAULT 'completed'",
             "hf_url": "TEXT DEFAULT ''",
             "autov3": "TEXT",
+            "civitai_stats": "TEXT",
+            "civitai_published_at": "TEXT",
+            "pinned": "INTEGER",
         }
 
         for column, definition in required_columns.items():
@@ -633,6 +653,12 @@ class PersistentModelCache:
         else:
             autov3_column = (autov3_value or "").lower()
 
+        stats = civitai.get("stats") if isinstance(civitai, Mapping) else None
+        civitai_published_at = (
+            civitai.get("publishedAt") if isinstance(civitai, Mapping) else None
+        ) or None
+        civitai_stats_json = json.dumps(stats) if isinstance(stats, Mapping) and stats else None
+
         return (
             model_type,
             item.get("file_path"),
@@ -665,6 +691,9 @@ class PersistentModelCache:
             float(item.get("last_checked_at") or 0.0),
             item.get("hash_status", "completed"),
             item.get("hf_url") or "",
+            civitai_stats_json,
+            civitai_published_at,
+            1 if item.get("pinned") else 0,
         )
 
     def _insert_model_sql(self) -> str:

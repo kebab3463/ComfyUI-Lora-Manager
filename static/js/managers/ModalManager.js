@@ -238,6 +238,18 @@ export class ModalManager {
             });
         }
 
+        // Add refreshStatsConfirmModal registration
+        const refreshStatsConfirmModal = document.getElementById('refreshStatsConfirmModal');
+        if (refreshStatsConfirmModal) {
+            this.registerModal('refreshStatsConfirmModal', {
+                element: refreshStatsConfirmModal,
+                onClose: () => {
+                    this.getModal('refreshStatsConfirmModal').element.classList.remove('show');
+                    document.body.classList.remove('modal-open');
+                }
+            });
+        }
+
         // Add helpModal registration
         const helpModal = document.getElementById('helpModal');
         if (helpModal) {
@@ -423,6 +435,7 @@ export class ModalManager {
           id === "clearCacheModal" ||
           id === "bulkDeleteModal" ||
           id === "checkUpdatesConfirmModal" ||
+          id === "refreshStatsConfirmModal" ||
           id === "resolveFilenameConflictsModal"
         ) {
           modal.element.classList.add("show");

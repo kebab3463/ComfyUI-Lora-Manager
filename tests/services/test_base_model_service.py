@@ -1,4 +1,6 @@
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from py.services.base_model_service import BaseModelService
 from py.services.lora_service import LoraService
@@ -1394,3 +1396,239 @@ class TestApplyHashFilters:
         result = await service._apply_hash_filters(data, {})
 
         assert result == data
+
+
+def _filter_service() -> "DummyService":
+    return DummyService(
+        model_type="stub",
+        scanner=object(),
+        metadata_class=BaseModelMetadata,
+        cache_repository=StubRepository([]),
+        filter_set=StubFilterSet([]),
+        search_strategy=StubSearchStrategy([]),
+        settings_provider=StubSettings({}),
+    )
+
+
+def test_minimal_civitai_data_carries_card_fields():
+    """The browser list response is minimal; the card renders from exactly it."""
+    service = _filter_service()
+
+    filtered = service.filter_civitai_data(
+        {
+            "id": 1,
+            "modelId": 2,
+            "name": "v1",
+            "trainedWords": ["a"],
+            "stats": {"thumbsUpCount": 3},
+            "publishedAt": "2024-03-01T00:00:00Z",
+            "description": "dropped",
+            "images": ["dropped"],
+        },
+        minimal=True,
+    )
+
+    assert filtered["stats"] == {"thumbsUpCount": 3}
+    assert filtered["publishedAt"] == "2024-03-01T00:00:00Z"
+    # The minimal projection still drops the heavy fields.
+    assert "description" not in filtered
+    assert "images" not in filtered
+
+
+def test_full_civitai_data_keeps_both_date_fields():
+    """The non-minimal path feeds detail views, which may need createdAt."""
+    service = _filter_service()
+
+    filtered = service.filter_civitai_data(
+        {"id": 1, "publishedAt": "2024-03-01T00:00:00Z", "createdAt": "2023-07-04T00:00:00Z"},
+        minimal=False,
+    )
+
+    assert filtered["publishedAt"] == "2024-03-01T00:00:00Z"
+    assert filtered["createdAt"] == "2023-07-04T00:00:00Z"
+
+
+def test_filter_civitai_data_omits_absent_keys():
+    service = _filter_service()
+
+    assert service.filter_civitai_data({"id": 1}, minimal=True) == {"id": 1}
+    assert service.filter_civitai_data({}, minimal=True) == {}
+
+
+def _pin_service(items, settings=None):
+    return DummyService(
+        model_type="stub",
+        scanner=object(),
+        metadata_class=BaseModelMetadata,
+        cache_repository=StubRepository(items),
+        filter_set=PassThroughFilterSet(),
+        search_strategy=NoSearchStrategy(),
+        settings_provider=StubSettings(settings or {}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_pinned_version_represents_the_group_over_the_latest():
+    """A pin overrides the default 'highest version id wins' rule."""
+    items = [
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 100}, "pinned": True},
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 200}},
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 300}},
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", group_by_model=True
+    )
+
+    assert response["total"] == 1
+    kept = response["items"][0]
+    assert kept["civitai"]["id"] == 100
+    # The count still reflects every local version, not just the pinned one.
+    assert kept["version_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_latest_still_wins_without_a_pin():
+    items = [
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 100}},
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 300}},
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", group_by_model=True
+    )
+
+    assert response["items"][0]["civitai"]["id"] == 300
+
+
+@pytest.mark.asyncio
+async def test_pin_does_not_hide_versions_when_grouping_is_off():
+    """Pinning only chooses a representative; it never filters the browser."""
+    items = [
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 100}, "pinned": True},
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 300}},
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc"
+    )
+
+    assert response["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_pin_only_affects_its_own_group():
+    items = [
+        {"model_name": "A", "folder": "r", "civitai": {"modelId": 1, "id": 100}, "pinned": True},
+        {"model_name": "A", "folder": "r", "civitai": {"modelId": 1, "id": 300}},
+        {"model_name": "B", "folder": "r", "civitai": {"modelId": 2, "id": 10}},
+        {"model_name": "B", "folder": "r", "civitai": {"modelId": 2, "id": 20}},
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", group_by_model=True
+    )
+
+    by_model = {i["civitai"]["modelId"]: i["civitai"]["id"] for i in response["items"]}
+    assert by_model == {1: 100, 2: 20}
+
+
+@pytest.mark.asyncio
+async def test_newest_pin_wins_if_two_versions_are_somehow_pinned():
+    """Defensive: stale sidecars could leave two pins in one group."""
+    items = [
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 100}, "pinned": True},
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 200}, "pinned": True},
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 300}},
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", group_by_model=True
+    )
+
+    assert response["items"][0]["civitai"]["id"] == 200
+
+
+@pytest.mark.asyncio
+async def test_pin_respects_base_model_subgrouping():
+    """With version_grouping=same_base each base model keeps its own pin."""
+    items = [
+        {"model_name": "M", "folder": "r", "base_model": "SD1.5",
+         "civitai": {"modelId": 1, "id": 100}, "pinned": True},
+        {"model_name": "M", "folder": "r", "base_model": "SD1.5",
+         "civitai": {"modelId": 1, "id": 150}},
+        {"model_name": "M", "folder": "r", "base_model": "SDXL",
+         "civitai": {"modelId": 1, "id": 200}},
+        {"model_name": "M", "folder": "r", "base_model": "SDXL",
+         "civitai": {"modelId": 1, "id": 250}},
+    ]
+
+    response = await _pin_service(
+        items, {"version_grouping": "same_base"}
+    ).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", group_by_model=True
+    )
+
+    by_base = {i["base_model"]: i["civitai"]["id"] for i in response["items"]}
+    # SD1.5 honours its pin; SDXL has none, so its latest wins.
+    assert by_base == {"SD1.5": 100, "SDXL": 250}
+
+
+class _StubCache:
+    def __init__(self, raw_data):
+        self.raw_data = raw_data
+
+
+def _sibling_service(raw_data, settings=None):
+    scanner = SimpleNamespace(get_cached_data=AsyncMock(return_value=_StubCache(raw_data)))
+    return DummyService(
+        model_type="stub",
+        scanner=scanner,
+        metadata_class=BaseModelMetadata,
+        cache_repository=StubRepository([]),
+        filter_set=PassThroughFilterSet(),
+        search_strategy=NoSearchStrategy(),
+        settings_provider=StubSettings(settings or {}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_group_siblings_matches_the_dedup_grouping():
+    raw = [
+        {"file_path": "/a", "base_model": "SDXL", "civitai": {"modelId": 1, "id": 1}},
+        {"file_path": "/b", "base_model": "SDXL", "civitai": {"modelId": 1, "id": 2}},
+        {"file_path": "/c", "base_model": "SD1.5", "civitai": {"modelId": 1, "id": 3}},
+        {"file_path": "/d", "base_model": "SDXL", "civitai": {"modelId": 2, "id": 4}},
+    ]
+    service = _sibling_service(raw, {"version_grouping": "same_base"})
+
+    paths = {i["file_path"] for i in await service.find_group_siblings("/a")}
+
+    # Same modelId AND same base model; /c is a different base, /d a different model.
+    assert paths == {"/a", "/b"}
+
+
+@pytest.mark.asyncio
+async def test_find_group_siblings_spans_base_models_when_grouping_is_any():
+    raw = [
+        {"file_path": "/a", "base_model": "SDXL", "civitai": {"modelId": 1, "id": 1}},
+        {"file_path": "/c", "base_model": "SD1.5", "civitai": {"modelId": 1, "id": 3}},
+    ]
+    service = _sibling_service(raw, {"version_grouping": "any"})
+
+    paths = {i["file_path"] for i in await service.find_group_siblings("/a")}
+
+    assert paths == {"/a", "/c"}
+
+
+@pytest.mark.asyncio
+async def test_find_group_siblings_returns_empty_for_unknown_or_ungroupable():
+    raw = [
+        {"file_path": "/a", "civitai": {"modelId": 1, "id": 1}},
+        {"file_path": "/solo"},
+    ]
+    service = _sibling_service(raw)
+
+    assert await service.find_group_siblings("/missing") == []
+    # No civitai modelId and no HF url means no group to pin within.
+    assert await service.find_group_siblings("/solo") == []

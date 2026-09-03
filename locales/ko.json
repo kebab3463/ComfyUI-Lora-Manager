@@ -147,9 +147,23 @@
         "usage": {
             "timesUsed": "사용 횟수"
         },
+        "stats": {
+            "likes": "[TODO: Translate] Civitai likes",
+            "downloads": "[TODO: Translate] Civitai downloads"
+        },
         "footer": {
             "versionCount": "{count}개 버전",
             "viewAllVersions": "모든 로컬 버전 보기"
+        },
+        "uploaded": {
+            "title": "[TODO: Translate] Uploaded to Civitai",
+            "thisMonth": "[TODO: Translate] this month",
+            "months": "[TODO: Translate] {{count}}mo ago",
+            "years": "[TODO: Translate] {{years}}y ago",
+            "yearsMonths": "[TODO: Translate] {{years}}y {{months}}mo ago"
+        },
+        "pinned": {
+            "title": "[TODO: Translate] Pinned as this model's version"
         }
     },
     "globalContextMenu": {
@@ -736,6 +750,12 @@
                 "versionsCountDesc": "버전 수 많은 순",
                 "versionsCountAsc": "버전 수 적은 순",
                 "versionIdDesc": "최신 버전순",
+                "likes": "[TODO: Translate] Civitai Likes",
+                "likesDesc": "[TODO: Translate] Most liked",
+                "likesAsc": "[TODO: Translate] Least liked",
+                "downloads": "[TODO: Translate] Civitai Downloads",
+                "downloadsDesc": "[TODO: Translate] Most downloaded",
+                "downloadsAsc": "[TODO: Translate] Least downloaded",
                 "random": "랜덤",
                 "randomAction": "셔플 (무작위)"
             },
@@ -746,7 +766,10 @@
             },
             "fetch": {
                 "title": "Civitai에서 메타데이터 가져오기",
-                "action": "가져오기"
+                "action": "가져오기",
+                "menuLabel": "[TODO: Translate] Show fetch options",
+                "stats": "[TODO: Translate] Fetch Civitai Stats",
+                "statsTooltip": "[TODO: Translate] Fetch Civitai like and download counts for the models currently listed."
             },
             "download": {
                 "title": "URL에서 다운로드",
@@ -847,7 +870,11 @@
             "viewAllLoras": "모든 LoRA 보기",
             "downloadMissingLoras": "누락된 LoRA 다운로드",
             "deleteRecipe": "레시피 삭제",
-            "enrichHfAgent": "HF AI로 메타데이터 보강"
+            "enrichHfAgent": "HF AI로 메타데이터 보강",
+            "pinVersion": "[TODO: Translate] Pin this version",
+            "unpinVersion": "[TODO: Translate] Unpin version",
+            "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
         }
     },
     "recipes": {
@@ -1328,6 +1355,12 @@
             "message": "라이브러리에 있는 모든 {type}의 업데이트를 확인합니다. 컬렉션이 클수록 시간이 조금 더 걸릴 수 있습니다.",
             "tip": "나눠서 진행하고 싶다면 벌크 모드로 전환해 필요한 모델만 선택한 뒤 \"선택 항목 업데이트 확인\"을 사용하세요.",
             "action": "전체 확인"
+        },
+        "refreshStats": {
+            "title": "[TODO: Translate] Fetch Civitai stats for {count} {typePlural}?",
+            "message": "[TODO: Translate] This fetches like and download counts for the {count} {typePlural} matching your current folder and filters.",
+            "tip": "[TODO: Translate] To fetch fewer, narrow the folder or search first — only what is currently listed gets updated.",
+            "action": "[TODO: Translate] Fetch Stats"
         },
         "bulkAddTags": {
             "title": "여러 모델에 태그 추가",
@@ -2054,7 +2087,10 @@
             "tagsAddFailed": "{count}개의 모델에 태그 추가에 실패했습니다",
             "tagsReplaceFailed": "{count}개의 모델의 태그 교체에 실패했습니다",
             "bulkTagsAddFailed": "모델에 태그 추가에 실패했습니다",
-            "bulkTagsReplaceFailed": "모델의 태그 교체에 실패했습니다"
+            "bulkTagsReplaceFailed": "모델의 태그 교체에 실패했습니다",
+            "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
+            "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
         },
         "search": {
             "atLeastOneOption": "최소 하나의 검색 옵션을 선택해야 합니다"
@@ -2156,7 +2192,8 @@
             "reloadFailed": "{pageType} 다시 로딩 실패: {message}",
             "refreshFailed": "{pageType} {action} 실패: {message}",
             "fetchMetadataFailed": "메타데이터 가져오기 실패: {message}",
-            "clearFilterFailed": "사용자 정의 필터 지우기 실패: {message}"
+            "clearFilterFailed": "사용자 정의 필터 지우기 실패: {message}",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh Civitai stats: {message}"
         },
         "contextMenu": {
             "contentRatingSet": "콘텐츠 등급이 {level}로 설정되었습니다",
@@ -2226,7 +2263,16 @@
             "exampleImagesDownloadFailed": "예시 이미지 다운로드 실패: {message}",
             "moveFailed": "Failed to move item: {message}",
             "copiedToClipboard": "클립보드에 복사됨",
-            "downloadStarted": "다운로드 시작됨"
+            "downloadStarted": "다운로드 시작됨",
+            "statsRefreshEmpty": "[TODO: Translate] No models match the current filters",
+            "statsRefreshStarting": "[TODO: Translate] Starting stats fetch...",
+            "statsRefreshProgress": "[TODO: Translate] Processing ({processed}/{total})",
+            "statsRefreshComplete": "[TODO: Translate] Completed: updated {success} of {processed} {type}s",
+            "statsRefreshRateLimited": "[TODO: Translate] Civitai rate limit reached; try again later",
+            "statsRefreshSuccess": "[TODO: Translate] Updated stats for {success} {type}s",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh stats: {message}",
+            "statsRefreshConnecting": "[TODO: Translate] Connecting...",
+            "statsRefreshDone": "[TODO: Translate] Stats update complete"
         },
         "agent": {
             "llmNotConfigured": "AI 제공자가 설정되지 않았습니다. 설정 → AI 제공자에서 활성화하세요.",

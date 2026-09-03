@@ -451,3 +451,246 @@ def test_get_models_missing_autov3_self_terminates_after_marking(tmp_path: Path,
     store.update_single_model('dummy', new_item, old_item=old_item)
 
     assert store.get_models_missing_autov3('dummy') == []
+
+
+def _stats_item(file_path: str, stats) -> Dict[str, Any]:
+    civitai: Dict[str, Any] = {'id': 7, 'modelId': 3, 'name': 'v1'}
+    if stats is not None:
+        civitai['stats'] = stats
+    return {
+        'file_path': file_path,
+        'file_name': 'stat',
+        'model_name': 'Stat Model',
+        'folder': '',
+        'size': 1,
+        'modified': 1.0,
+        'sha256': 'sha-stat',
+        'base_model': 'SDXL',
+        'preview_url': '',
+        'preview_nsfw_level': 0,
+        'from_civitai': True,
+        'favorite': False,
+        'notes': '',
+        'usage_tips': '',
+        'metadata_source': None,
+        'exclude': False,
+        'db_checked': False,
+        'last_checked_at': 0.0,
+        'tags': [],
+        'civitai': civitai,
+        'civitai_deleted': False,
+        'skip_metadata_refresh': False,
+        'license_flags': DEFAULT_LICENSE_FLAGS,
+        'hash_status': 'completed',
+        'hf_url': '',
+    }
+
+
+def test_civitai_stats_roundtrip(tmp_path: Path, monkeypatch) -> None:
+    """Civitai version stats survive a save/load cycle."""
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    db_path = tmp_path / 'cache.sqlite'
+    store = PersistentModelCache(db_path=str(db_path))
+
+    file_path = (tmp_path / 'stat.safetensors').as_posix()
+    stats = {'thumbsUpCount': 128, 'downloadCount': 4096, 'ratingCount': 9, 'rating': 4.8}
+    store.update_single_model('lora', _stats_item(file_path, stats))
+
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    item = next(entry for entry in persisted.raw_data if entry['file_path'] == file_path)
+    assert item['civitai']['stats'] == stats
+    # The rest of the civitai projection is unaffected.
+    assert item['civitai']['id'] == 7
+    assert item['civitai']['modelId'] == 3
+
+
+def test_civitai_stats_absent_leaves_no_stats_key(tmp_path: Path, monkeypatch) -> None:
+    """A model without stats round-trips without an empty stats dict."""
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    db_path = tmp_path / 'cache.sqlite'
+    store = PersistentModelCache(db_path=str(db_path))
+
+    file_path = (tmp_path / 'nostat.safetensors').as_posix()
+    store.update_single_model('lora', _stats_item(file_path, None))
+
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    item = next(entry for entry in persisted.raw_data if entry['file_path'] == file_path)
+    assert 'stats' not in item['civitai']
+
+
+def test_civitai_stats_column_is_added_to_legacy_databases(tmp_path: Path, monkeypatch) -> None:
+    """An existing DB created before the column gains it via ALTER TABLE."""
+    import sqlite3
+
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    db_path = tmp_path / 'legacy.sqlite'
+
+    # Build a schema that predates civitai_stats.
+    legacy_columns = [c for c in PersistentModelCache._MODEL_COLUMNS if c != 'civitai_stats']
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        'CREATE TABLE models ({}, PRIMARY KEY (model_type, file_path))'.format(
+            ', '.join(f'{name} TEXT' for name in legacy_columns)
+        )
+    )
+    conn.commit()
+    conn.close()
+
+    store = PersistentModelCache(db_path=str(db_path))
+
+    conn = sqlite3.connect(str(db_path))
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(models)')}
+    conn.close()
+    assert 'civitai_stats' in columns
+
+    # And the migrated database is usable end to end.
+    file_path = (tmp_path / 'legacy.safetensors').as_posix()
+    store.update_single_model('lora', _stats_item(file_path, {'thumbsUpCount': 5}))
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    item = next(entry for entry in persisted.raw_data if entry['file_path'] == file_path)
+    assert item['civitai']['stats'] == {'thumbsUpCount': 5}
+
+
+def _published_item(file_path: str, published_at) -> Dict[str, Any]:
+    item = _stats_item(file_path, None)
+    if published_at is not None:
+        item['civitai']['publishedAt'] = published_at
+    return item
+
+
+def test_civitai_published_at_roundtrip(tmp_path: Path, monkeypatch) -> None:
+    """The upload date survives a save/load cycle, so it outlives a restart."""
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    store = PersistentModelCache(db_path=str(tmp_path / 'cache.sqlite'))
+
+    file_path = (tmp_path / 'pub.safetensors').as_posix()
+    store.update_single_model('lora', _published_item(file_path, '2024-03-01T12:00:00Z'))
+
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    item = next(entry for entry in persisted.raw_data if entry['file_path'] == file_path)
+    assert item['civitai']['publishedAt'] == '2024-03-01T12:00:00Z'
+
+
+def test_civitai_published_at_absent_leaves_no_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    store = PersistentModelCache(db_path=str(tmp_path / 'cache.sqlite'))
+
+    file_path = (tmp_path / 'nopub.safetensors').as_posix()
+    store.update_single_model('lora', _published_item(file_path, None))
+
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    item = next(entry for entry in persisted.raw_data if entry['file_path'] == file_path)
+    assert 'publishedAt' not in item['civitai']
+
+
+def test_published_at_alone_reconstructs_the_civitai_dict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A row carrying only an upload date must still rebuild a civitai dict."""
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    store = PersistentModelCache(db_path=str(tmp_path / 'cache.sqlite'))
+
+    file_path = (tmp_path / 'only_date.safetensors').as_posix()
+    item = _stats_item(file_path, None)
+    item['civitai'] = {'publishedAt': '2023-01-05T00:00:00Z'}
+    store.update_single_model('lora', item)
+
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    loaded = next(entry for entry in persisted.raw_data if entry['file_path'] == file_path)
+    assert loaded['civitai']['publishedAt'] == '2023-01-05T00:00:00Z'
+
+
+def test_civitai_published_at_column_is_added_to_legacy_databases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An existing DB created before the column gains it via ALTER TABLE."""
+    import sqlite3
+
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    db_path = tmp_path / 'legacy_pub.sqlite'
+
+    legacy_columns = [
+        c for c in PersistentModelCache._MODEL_COLUMNS if c != 'civitai_published_at'
+    ]
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        'CREATE TABLE models ({}, PRIMARY KEY (model_type, file_path))'.format(
+            ', '.join(f'{name} TEXT' for name in legacy_columns)
+        )
+    )
+    conn.commit()
+    conn.close()
+
+    store = PersistentModelCache(db_path=str(db_path))
+
+    conn = sqlite3.connect(str(db_path))
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(models)')}
+    conn.close()
+    assert 'civitai_published_at' in columns
+
+    file_path = (tmp_path / 'legacy_pub.safetensors').as_posix()
+    store.update_single_model('lora', _published_item(file_path, '2022-06-01T00:00:00Z'))
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    item = next(entry for entry in persisted.raw_data if entry['file_path'] == file_path)
+    assert item['civitai']['publishedAt'] == '2022-06-01T00:00:00Z'
+
+
+def test_pinned_flag_roundtrip(tmp_path: Path, monkeypatch) -> None:
+    """The pin lives in the sidecar but must also survive in the cache."""
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    store = PersistentModelCache(db_path=str(tmp_path / 'cache.sqlite'))
+
+    pinned_path = (tmp_path / 'pinned.safetensors').as_posix()
+    plain_path = (tmp_path / 'plain.safetensors').as_posix()
+
+    pinned_item = _stats_item(pinned_path, None)
+    pinned_item['pinned'] = True
+    store.update_single_model('lora', pinned_item)
+    store.update_single_model('lora', _stats_item(plain_path, None))
+
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    by_path = {entry['file_path']: entry for entry in persisted.raw_data}
+    assert by_path[pinned_path]['pinned'] is True
+    # Absent means not pinned, never None.
+    assert by_path[plain_path]['pinned'] is False
+
+
+def test_pinned_column_is_added_to_legacy_databases(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    db_path = tmp_path / 'legacy_pin.sqlite'
+
+    legacy_columns = [c for c in PersistentModelCache._MODEL_COLUMNS if c != 'pinned']
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        'CREATE TABLE models ({}, PRIMARY KEY (model_type, file_path))'.format(
+            ', '.join(f'{name} TEXT' for name in legacy_columns)
+        )
+    )
+    conn.commit()
+    conn.close()
+
+    store = PersistentModelCache(db_path=str(db_path))
+
+    conn = sqlite3.connect(str(db_path))
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(models)')}
+    conn.close()
+    assert 'pinned' in columns
+
+    file_path = (tmp_path / 'legacy_pin.safetensors').as_posix()
+    item = _stats_item(file_path, None)
+    item['pinned'] = True
+    store.update_single_model('lora', item)
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    entry = next(e for e in persisted.raw_data if e['file_path'] == file_path)
+    assert entry['pinned'] is True

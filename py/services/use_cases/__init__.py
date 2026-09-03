@@ -13,6 +13,10 @@ from .download_model_use_case import (
     DownloadModelUseCase,
     DownloadModelValidationError,
 )
+from .refresh_model_stats_use_case import (
+    RefreshModelStatsUseCase,
+    StatsRefreshProgressReporter,
+)
 from .example_images import (
     DownloadExampleImagesConfigurationError,
     DownloadExampleImagesInProgressError,
@@ -26,6 +30,8 @@ __all__ = [
     "AutoOrganizeUseCase",
     "BulkMetadataRefreshUseCase",
     "MetadataRefreshProgressReporter",
+    "RefreshModelStatsUseCase",
+    "StatsRefreshProgressReporter",
     "DownloadModelEarlyAccessError",
     "DownloadModelUseCase",
     "DownloadModelValidationError",

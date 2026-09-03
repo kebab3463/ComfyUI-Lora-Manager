@@ -26,6 +26,27 @@ SUPPORTED_SORT_MODES = [
 
 DISPLAY_NAME_MODES = {"model_name", "file_name"}
 
+# Sentinel for a Civitai stat that has never been fetched. Using -1 rather than
+# 0 keeps never-fetched models distinguishable from models that genuinely have
+# a zero count, so a descending sort lists the unknowns last.
+UNKNOWN_CIVITAI_STAT = -1
+
+
+def get_civitai_stat(item: Dict[str, Any], key: str) -> float:
+    """Return a numeric Civitai version stat, or UNKNOWN_CIVITAI_STAT if absent."""
+    civitai = item.get('civitai')
+    if not isinstance(civitai, dict):
+        return UNKNOWN_CIVITAI_STAT
+
+    stats = civitai.get('stats')
+    if not isinstance(stats, dict):
+        return UNKNOWN_CIVITAI_STAT
+
+    value = stats.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return UNKNOWN_CIVITAI_STAT
+    return value
+
 
 @dataclass
 class ModelCache:
@@ -266,6 +287,19 @@ class ModelCache:
                 data,
                 key=lambda x: (
                     x.get('usage_count', 0),
+                    self._get_display_name(x).lower(),
+                    x.get('file_path', '').lower()
+                ),
+                reverse=reverse
+            )
+        elif sort_key in ('likes', 'downloads'):
+            # Sort by the Civitai version stat, fallback to name and path for
+            # stability. Never-fetched models sort below a genuine zero.
+            stat_key = 'thumbsUpCount' if sort_key == 'likes' else 'downloadCount'
+            result = sorted(
+                data,
+                key=lambda x: (
+                    get_civitai_stat(x, stat_key),
                     self._get_display_name(x).lower(),
                     x.get('file_path', '').lower()
                 ),

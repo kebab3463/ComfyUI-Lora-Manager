@@ -14,6 +14,66 @@ export const ModelContextMenuMixin = {
         return state?.pages?.[state.currentPageType]?.viewMode === 'excluded';
     },
 
+    // Reflects the current card's pin state, and disables the item for models
+    // with no group identity, where a pin could never take effect.
+    updatePinMenuItem(card) {
+        const pinItem = this.menu?.querySelector('[data-action="pin-version"]');
+        if (!pinItem || !card) return;
+
+        const isPinned = card.dataset.pinned === 'true';
+        const isGroupable = !!card.dataset.modelId;
+
+        const label = pinItem.querySelector('span');
+        if (label) {
+            label.textContent = isPinned
+                ? translate('loras.contextMenu.unpinVersion', {}, 'Unpin version')
+                : translate('loras.contextMenu.pinVersion', {}, 'Pin this version');
+        }
+
+        pinItem.classList.toggle('disabled', !isGroupable);
+        pinItem.title = isGroupable
+            ? translate(
+                  'loras.contextMenu.pinVersionTooltip',
+                  {},
+                  'Show this version on the grouped card instead of the latest one'
+              )
+            : translate(
+                  'loras.contextMenu.pinVersionUngroupable',
+                  {},
+                  'This model has no Civitai or HuggingFace group to pin within'
+              );
+    },
+
+    async togglePinVersion() {
+        const card = this.currentCard;
+        if (!card || !card.dataset.modelId) return;
+
+        const filePath = card.dataset.filepath;
+        const pinned = card.dataset.pinned !== 'true';
+
+        try {
+            await getModelApiClient().pinVersion(filePath, pinned);
+            card.dataset.pinned = pinned ? 'true' : 'false';
+            showToast(
+                pinned ? 'toast.models.versionPinned' : 'toast.models.versionUnpinned',
+                {},
+                'success'
+            );
+
+            const resetFn = this.resetAndReload || resetAndReload;
+            if (typeof resetFn === 'function') {
+                await resetFn(false);
+            }
+        } catch (error) {
+            console.error('Error pinning version:', error);
+            showToast(
+                'toast.models.versionPinFailed',
+                { message: error?.message ?? 'Unknown error' },
+                'error'
+            );
+        }
+    },
+
     updateExcludeMenuItem() {
         const excludeItem = this.menu?.querySelector('[data-action="exclude"], [data-action="restore"]');
         if (!excludeItem) {
@@ -374,6 +434,9 @@ export const ModelContextMenuMixin = {
                 return true;
             case 'check-updates':
                 this.checkUpdatesForCurrentModel();
+                return true;
+            case 'pin-version':
+                this.togglePinVersion();
                 return true;
             default:
                 return false;

@@ -48,6 +48,16 @@
                             <option value="versions_count:asc">{{ t('loras.controls.sort.versionsCountAsc', default='Fewest versions first') }}</option>
                         </optgroup>
                     {% endif %}
+                    {% if page_id != 'recipes' %}
+                        <optgroup label="{{ t('loras.controls.sort.likes', default='Civitai Likes') }}">
+                            <option value="likes:desc">{{ t('loras.controls.sort.likesDesc', default='Most liked') }}</option>
+                            <option value="likes:asc">{{ t('loras.controls.sort.likesAsc', default='Least liked') }}</option>
+                        </optgroup>
+                        <optgroup label="{{ t('loras.controls.sort.downloads', default='Civitai Downloads') }}">
+                            <option value="downloads:desc">{{ t('loras.controls.sort.downloadsDesc', default='Most downloaded') }}</option>
+                            <option value="downloads:asc">{{ t('loras.controls.sort.downloadsAsc', default='Least downloaded') }}</option>
+                        </optgroup>
+                    {% endif %}
                     {% if page_id == 'recipes' %}
                         <optgroup label="{{ t('recipes.controls.sort.lorasCount') }}">
                             <option value="loras_count:desc">{{ t('recipes.controls.sort.lorasCountDesc') }}</option>
@@ -77,8 +87,16 @@
             </div>
             
             {% if page_id != 'recipes' %}
-            <div class="control-group">
-                <button data-action="fetch" title="{{ t('loras.controls.fetch.title') }}"><i class="fas fa-download"></i> <span>{{ t('loras.controls.fetch.action') }}</span></button>
+            <div title="{{ t('loras.controls.fetch.title') }}" class="control-group dropdown-group">
+                <button data-action="fetch" class="dropdown-main"><i class="fas fa-download"></i> <span>{{ t('loras.controls.fetch.action') }}</span></button>
+                <button class="dropdown-toggle" aria-label="{{ t('loras.controls.fetch.menuLabel', default='Show fetch options') }}">
+                    <i class="fas fa-caret-down"></i>
+                </button>
+                <div class="dropdown-menu">
+                    <div class="dropdown-item" data-action="fetch-stats" title="{{ t('loras.controls.fetch.statsTooltip', default='Fetch Civitai like and download counts for the models currently listed.') }}">
+                        <i class="fas fa-thumbs-up"></i> <span>{{ t('loras.controls.fetch.stats', default='Fetch Civitai Stats') }}</span>
+                    </div>
+                </div>
             </div>
             <div class="control-group">
                 <button data-action="download" title="{{ t('loras.controls.download.title') }}">

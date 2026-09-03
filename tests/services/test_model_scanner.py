@@ -267,6 +267,132 @@ async def test_build_cache_entry_encodes_license_flags(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_build_cache_entry_keeps_numeric_civitai_stats(tmp_path: Path):
+    """The slim cache payload must carry version stats so sorting can use them."""
+    scanner = DummyScanner(tmp_path)
+
+    metadata = {
+        "file_path": _normalize_path(tmp_path / "sample.txt"),
+        "file_name": "sample",
+        "model_name": "Sample",
+        "folder": "",
+        "size": 1,
+        "modified": 1.0,
+        "sha256": "hash",
+        "tags": [],
+        "civitai": {
+            "id": 5,
+            "stats": {
+                "thumbsUpCount": 12,
+                "downloadCount": 340,
+                "ratingCount": 2,
+                "rating": 4.5,
+                # Non-numeric extras stay in the sidecar but not in the cache.
+                "tippedAmountCount": None,
+                "someString": "nope",
+            },
+        },
+    }
+
+    entry = scanner._build_cache_entry(metadata)
+
+    assert entry["civitai"]["stats"] == {
+        "thumbsUpCount": 12,
+        "downloadCount": 340,
+        "ratingCount": 2,
+        "rating": 4.5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_cache_entry_omits_empty_civitai_stats(tmp_path: Path):
+    scanner = DummyScanner(tmp_path)
+
+    metadata = {
+        "file_path": _normalize_path(tmp_path / "sample.txt"),
+        "file_name": "sample",
+        "model_name": "Sample",
+        "folder": "",
+        "size": 1,
+        "modified": 1.0,
+        "sha256": "hash",
+        "tags": [],
+        "civitai": {"id": 5, "stats": {"someString": "nope"}},
+    }
+
+    entry = scanner._build_cache_entry(metadata)
+
+    assert "stats" not in entry["civitai"]
+
+
+def _published_metadata(tmp_path: Path, civitai: dict) -> dict:
+    return {
+        "file_path": _normalize_path(tmp_path / "sample.txt"),
+        "file_name": "sample",
+        "model_name": "Sample",
+        "folder": "",
+        "size": 1,
+        "modified": 1.0,
+        "sha256": "hash",
+        "tags": [],
+        "civitai": civitai,
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_cache_entry_keeps_published_at(tmp_path: Path):
+    """The upload date must reach the cache for the card to display it."""
+    scanner = DummyScanner(tmp_path)
+
+    entry = scanner._build_cache_entry(
+        _published_metadata(tmp_path, {"id": 5, "publishedAt": "2024-03-01T00:00:00Z"})
+    )
+
+    assert entry["civitai"]["publishedAt"] == "2024-03-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_build_cache_entry_falls_back_to_created_at(tmp_path: Path):
+    """Versions lacking publishedAt normalize onto the creation date."""
+    scanner = DummyScanner(tmp_path)
+
+    entry = scanner._build_cache_entry(
+        _published_metadata(tmp_path, {"id": 5, "createdAt": "2023-07-04T00:00:00Z"})
+    )
+
+    assert entry["civitai"]["publishedAt"] == "2023-07-04T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_build_cache_entry_prefers_published_over_created(tmp_path: Path):
+    scanner = DummyScanner(tmp_path)
+
+    entry = scanner._build_cache_entry(
+        _published_metadata(
+            tmp_path,
+            {
+                "id": 5,
+                "publishedAt": "2024-03-01T00:00:00Z",
+                "createdAt": "2023-07-04T00:00:00Z",
+            },
+        )
+    )
+
+    assert entry["civitai"]["publishedAt"] == "2024-03-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_build_cache_entry_omits_non_string_published_at(tmp_path: Path):
+    scanner = DummyScanner(tmp_path)
+
+    entry = scanner._build_cache_entry(
+        _published_metadata(tmp_path, {"id": 5, "publishedAt": 1700000000})
+    )
+
+    assert "publishedAt" not in entry["civitai"]
+
+
+@pytest.mark.asyncio
 async def test_initialize_in_background_uses_persisted_cache_without_full_scan(tmp_path: Path, monkeypatch):
     monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
     db_path = tmp_path / 'cache.sqlite'
@@ -757,6 +883,7 @@ def _make_cache_entry(**overrides) -> Dict[str, Any]:
         "preview_nsfw_level": 0,
         "from_civitai": True,
         "favorite": False,
+        "pinned": False,
         "notes": "old note",
         "usage_tips": "{}",
         "metadata_source": None,

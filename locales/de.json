@@ -147,9 +147,23 @@
         "usage": {
             "timesUsed": "Verwendungsanzahl"
         },
+        "stats": {
+            "likes": "[TODO: Translate] Civitai likes",
+            "downloads": "[TODO: Translate] Civitai downloads"
+        },
         "footer": {
             "versionCount": "{count} Versionen",
             "viewAllVersions": "Alle lokalen Versionen anzeigen"
+        },
+        "uploaded": {
+            "title": "[TODO: Translate] Uploaded to Civitai",
+            "thisMonth": "[TODO: Translate] this month",
+            "months": "[TODO: Translate] {{count}}mo ago",
+            "years": "[TODO: Translate] {{years}}y ago",
+            "yearsMonths": "[TODO: Translate] {{years}}y {{months}}mo ago"
+        },
+        "pinned": {
+            "title": "[TODO: Translate] Pinned as this model's version"
         }
     },
     "globalContextMenu": {
@@ -736,6 +750,12 @@
                 "versionsCountDesc": "Meiste Versionen zuerst",
                 "versionsCountAsc": "Wenigste Versionen zuerst",
                 "versionIdDesc": "Neueste Version zuerst",
+                "likes": "[TODO: Translate] Civitai Likes",
+                "likesDesc": "[TODO: Translate] Most liked",
+                "likesAsc": "[TODO: Translate] Least liked",
+                "downloads": "[TODO: Translate] Civitai Downloads",
+                "downloadsDesc": "[TODO: Translate] Most downloaded",
+                "downloadsAsc": "[TODO: Translate] Least downloaded",
                 "random": "Zufällig",
                 "randomAction": "Zufällig mischen"
             },
@@ -746,7 +766,10 @@
             },
             "fetch": {
                 "title": "Metadaten von Civitai abrufen",
-                "action": "Abrufen"
+                "action": "Abrufen",
+                "menuLabel": "[TODO: Translate] Show fetch options",
+                "stats": "[TODO: Translate] Fetch Civitai Stats",
+                "statsTooltip": "[TODO: Translate] Fetch Civitai like and download counts for the models currently listed."
             },
             "download": {
                 "title": "Von URL herunterladen",
@@ -847,7 +870,11 @@
             "viewAllLoras": "Alle LoRAs anzeigen",
             "downloadMissingLoras": "Fehlende LoRAs herunterladen",
             "deleteRecipe": "Rezept löschen",
-            "enrichHfAgent": "HF-Metadaten mit KI anreichern"
+            "enrichHfAgent": "HF-Metadaten mit KI anreichern",
+            "pinVersion": "[TODO: Translate] Pin this version",
+            "unpinVersion": "[TODO: Translate] Unpin version",
+            "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
         }
     },
     "recipes": {
@@ -1328,6 +1355,12 @@
             "message": "Damit werden alle {typePlural} in deiner Bibliothek auf Updates geprüft. Bei großen Sammlungen kann das etwas länger dauern.",
             "tip": "Du möchtest in Etappen prüfen? Wechsle in den Sammelmodus, wähle die benötigten Modelle aus und nutze anschließend \"Auswahl auf Updates prüfen\".",
             "action": "Alles prüfen"
+        },
+        "refreshStats": {
+            "title": "[TODO: Translate] Fetch Civitai stats for {count} {typePlural}?",
+            "message": "[TODO: Translate] This fetches like and download counts for the {count} {typePlural} matching your current folder and filters.",
+            "tip": "[TODO: Translate] To fetch fewer, narrow the folder or search first — only what is currently listed gets updated.",
+            "action": "[TODO: Translate] Fetch Stats"
         },
         "bulkAddTags": {
             "title": "Tags zu mehreren Modellen hinzufügen",
@@ -2054,7 +2087,10 @@
             "tagsAddFailed": "Fehler beim Hinzufügen von Tags zu {count} Modell(en)",
             "tagsReplaceFailed": "Fehler beim Ersetzen von Tags für {count} Modell(e)",
             "bulkTagsAddFailed": "Fehler beim Hinzufügen von Tags zu Modellen",
-            "bulkTagsReplaceFailed": "Fehler beim Ersetzen von Tags für Modelle"
+            "bulkTagsReplaceFailed": "Fehler beim Ersetzen von Tags für Modelle",
+            "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
+            "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
         },
         "search": {
             "atLeastOneOption": "Mindestens eine Suchoption muss ausgewählt werden"
@@ -2156,7 +2192,8 @@
             "reloadFailed": "Fehler beim Neuladen von {pageType}: {message}",
             "refreshFailed": "Fehler beim {action} von {pageType}: {message}",
             "fetchMetadataFailed": "Fehler beim Abrufen der Metadaten: {message}",
-            "clearFilterFailed": "Fehler beim Löschen des benutzerdefinierten Filters: {message}"
+            "clearFilterFailed": "Fehler beim Löschen des benutzerdefinierten Filters: {message}",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh Civitai stats: {message}"
         },
         "contextMenu": {
             "contentRatingSet": "Inhaltsbewertung auf {level} gesetzt",
@@ -2226,7 +2263,16 @@
             "exampleImagesDownloadFailed": "Fehler beim Herunterladen der Beispielbilder: {message}",
             "moveFailed": "Failed to move item: {message}",
             "copiedToClipboard": "In die Zwischenablage kopiert",
-            "downloadStarted": "Download gestartet"
+            "downloadStarted": "Download gestartet",
+            "statsRefreshEmpty": "[TODO: Translate] No models match the current filters",
+            "statsRefreshStarting": "[TODO: Translate] Starting stats fetch...",
+            "statsRefreshProgress": "[TODO: Translate] Processing ({processed}/{total})",
+            "statsRefreshComplete": "[TODO: Translate] Completed: updated {success} of {processed} {type}s",
+            "statsRefreshRateLimited": "[TODO: Translate] Civitai rate limit reached; try again later",
+            "statsRefreshSuccess": "[TODO: Translate] Updated stats for {success} {type}s",
+            "statsRefreshFailed": "[TODO: Translate] Failed to refresh stats: {message}",
+            "statsRefreshConnecting": "[TODO: Translate] Connecting...",
+            "statsRefreshDone": "[TODO: Translate] Stats update complete"
         },
         "agent": {
             "llmNotConfigured": "KI-Anbieter nicht konfiguriert. Aktivieren Sie ihn unter Einstellungen → KI-Anbieter.",
