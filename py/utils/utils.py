@@ -1,11 +1,19 @@
 from difflib import SequenceMatcher
+import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
 from ..services.service_registry import ServiceRegistry
 from ..config import config
 from ..services.settings_manager import get_settings_manager
+from .constants import (
+    MAX_FILENAME_STEM_LENGTH,
+    MAX_FOLDER_NAME_LENGTH,
+    MAX_PATH_TAG_LENGTH,
+)
 import asyncio
+
+logger = logging.getLogger(__name__)
 
 
 def get_lora_info(lora_name):
@@ -110,6 +118,16 @@ def get_lora_info_absolute(lora_name):
     async def _get_lora_info_absolute_async():
         scanner = await ServiceRegistry.get_lora_scanner()
         cache = await scanner.get_cached_data()
+
+        # Stack producers can resolve an exact business path. Preserve it even
+        # when several indexed LoRAs share the same basename.
+        if os.path.isabs(lora_name):
+            for item in cache.raw_data:
+                file_path = item.get("file_path")
+                if file_path and os.path.abspath(file_path) == os.path.abspath(lora_name):
+                    civitai = item.get("civitai") or {}
+                    return file_path, civitai.get("trainedWords", [])
+            return lora_name, []
 
         lora_name_normalized = lora_name.replace("\\", "/")
         lora_name_no_ext = lora_name_normalized
@@ -414,12 +432,17 @@ def fuzzy_match(text: str, pattern: str, threshold: float = 0.85) -> bool:
     return True
 
 
-def sanitize_folder_name(name: str, replacement: str = "_") -> str:
+def sanitize_folder_name(
+    name: str, replacement: str = "_", max_length: Optional[int] = None
+) -> str:
     """Sanitize a folder name by removing or replacing invalid characters.
 
     Args:
         name: The original folder name.
         replacement: The character to use when replacing invalid characters.
+        max_length: Optional maximum length for the resulting name. Longer
+            names are truncated (and re-trimmed) so that a single untrusted
+            value cannot blow past filesystem path limits.
 
     Returns:
         A sanitized folder name safe to use across common filesystems.
@@ -445,6 +468,15 @@ def sanitize_folder_name(name: str, replacement: str = "_") -> str:
     else:
         # If no replacement, just strip spaces and dots from right, spaces from left
         sanitized = sanitized.rstrip(" .").lstrip(" ")
+
+    if max_length is not None and max_length > 0 and len(sanitized) > max_length:
+        sanitized = sanitized[:max_length]
+        # Re-trim separators and spaces exposed by the cut so the truncated
+        # name stays filesystem-safe.
+        if replacement:
+            sanitized = sanitized.rstrip(" ." + replacement).lstrip(" " + replacement)
+        else:
+            sanitized = sanitized.rstrip(" .").lstrip(" ")
 
     if not sanitized:
         return "unnamed"
@@ -572,12 +604,20 @@ def calculate_relative_path_for_model(
     if not first_tag:
         first_tag = "no tags"  # Default if no tags available
 
+    # Tags are user-generated on CivitAI, so sanitize the value before it
+    # becomes a path segment and cap its length (#1119).
+    first_tag = sanitize_folder_name(first_tag, max_length=MAX_PATH_TAG_LENGTH)
+
     # Format the template with available data
-    model_name = sanitize_folder_name(model_data.get("model_name", ""))
+    model_name = sanitize_folder_name(
+        model_data.get("model_name", ""), max_length=MAX_FOLDER_NAME_LENGTH
+    )
     version_name = ""
 
     if isinstance(civitai_data, dict):
-        version_name = sanitize_folder_name(civitai_data.get("name") or "")
+        version_name = sanitize_folder_name(
+            civitai_data.get("name") or "", max_length=MAX_FOLDER_NAME_LENGTH
+        )
 
     formatted_path = path_template
     formatted_path = formatted_path.replace("{base_model}", mapped_base_model)
@@ -596,6 +636,114 @@ def calculate_relative_path_for_model(
     formatted_path = formatted_path.rstrip("/")
 
     return formatted_path
+
+
+def calculate_filename_for_model(
+    model_data: Dict[str, Any], model_type: str = "lora"
+) -> str:
+    """Calculate the filename stem for a model using the filename template.
+
+    Mirrors the data extraction of :func:`calculate_relative_path_for_model`
+    but renders a single filename (no path segments). Missing values resolve
+    to empty segments instead of the path-oriented defaults ("Anonymous" /
+    "no tags") so templates degrade gracefully.
+
+    Args:
+        model_data: Model data from scanner cache
+        model_type: Type of model ('lora', 'checkpoint', 'embedding')
+
+    Returns:
+        Sanitized filename stem without extension, or an empty string when no
+        template is configured, the template is invalid, or the rendered name
+        is empty.
+    """
+    settings_manager = get_settings_manager()
+    template = settings_manager.get_download_filename_template(model_type)
+
+    if not template:
+        return ""
+
+    # A filename template must render a single name, never folder segments.
+    if "/" in template or "\\" in template:
+        logger.warning(
+            "Filename template for %s contains a path separator and is ignored: %r",
+            model_type,
+            template,
+        )
+        return ""
+
+    civitai_data = model_data.get("civitai", {})
+
+    author = ""
+    if isinstance(civitai_data, dict) and civitai_data.get("id") is not None:
+        creator_info = civitai_data.get("creator") or {}
+        author = creator_info.get("username") or ""
+
+    base_model = model_data.get("base_model", "")
+    base_model_mappings = settings_manager.get("base_model_path_mappings", {})
+    mapped_base_model = base_model_mappings.get(base_model, base_model)
+
+    lowercase_tags = [
+        tag.lower() for tag in model_data.get("tags", []) if isinstance(tag, str)
+    ]
+    first_tag = settings_manager.resolve_priority_tag_for_model(
+        lowercase_tags, model_type
+    )
+
+    model_name = model_data.get("model_name", "")
+    version_name = ""
+    if isinstance(civitai_data, dict):
+        version_name = civitai_data.get("name") or ""
+
+    sha256 = model_data.get("sha256") or ""
+    hash_short = sha256[:10].lower() if isinstance(sha256, str) else ""
+
+    file_path = model_data.get("file_path") or ""
+    if isinstance(file_path, str) and file_path:
+        original_name = os.path.splitext(os.path.basename(file_path))[0]
+    else:
+        original_name = os.path.splitext(str(model_data.get("file_name", "")))[0]
+
+    def _sanitize_value(value: Any, max_length: Optional[int] = None) -> str:
+        # sanitize_folder_name falls back to "unnamed" for empty input; for
+        # templates an empty value must stay empty so segments collapse.
+        text = str(value) if value else ""
+        if not text:
+            return ""
+        return sanitize_folder_name(text, max_length=max_length)
+
+    replacements = {
+        "{model_name}": _sanitize_value(model_name, MAX_FILENAME_STEM_LENGTH),
+        "{version_name}": _sanitize_value(version_name, MAX_FILENAME_STEM_LENGTH),
+        "{base_model}": _sanitize_value(mapped_base_model, MAX_FILENAME_STEM_LENGTH),
+        "{author}": _sanitize_value(author, MAX_FILENAME_STEM_LENGTH),
+        "{first_tag}": _sanitize_value(first_tag, MAX_PATH_TAG_LENGTH),
+        "{hash_short}": hash_short,
+        "{original_name}": _sanitize_value(original_name, MAX_FILENAME_STEM_LENGTH),
+    }
+
+    result = template
+    for placeholder, value in replacements.items():
+        result = result.replace(placeholder, value)
+
+    if model_type == "embedding":
+        result = result.replace(" ", "_")
+
+    # Strip characters that are illegal in filenames on common filesystems.
+    result = re.sub(r'[:*?"<>|]', "", result)
+    # Collapse runs of identical separators introduced by empty substitutions.
+    result = re.sub(r"([-_. ])\1+", r"\1", result)
+    # Drop separators left dangling next to each other ("- -" -> "-").
+    result = re.sub(r" ?([-_.]) (?=[-_.])", r"\1", result)
+    # A stem must not start or end with separators, spaces or dots.
+    result = result.strip("-_. ")
+
+    # A template can concatenate several values, so cap the rendered stem as
+    # well and re-trim the cut.
+    if len(result) > MAX_FILENAME_STEM_LENGTH:
+        result = result[:MAX_FILENAME_STEM_LENGTH].strip("-_. ")
+
+    return result
 
 
 def remove_empty_dirs(path):

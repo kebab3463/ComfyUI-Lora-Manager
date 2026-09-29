@@ -1,12 +1,14 @@
 import { modalManager } from './ModalManager.js';
 import { showToast } from '../utils/uiHelpers.js';
 import { state, createDefaultSettings } from '../state/index.js';
-import { resetAndReload } from '../api/modelApiFactory.js';
+import { resetAndReload, getModelApiClient } from '../api/modelApiFactory.js';
 import { 
     DOWNLOAD_PATH_TEMPLATES, 
     MAPPABLE_BASE_MODELS, 
     PATH_TEMPLATE_PLACEHOLDERS, 
     DEFAULT_PATH_TEMPLATES, 
+    FILENAME_TEMPLATE_PLACEHOLDERS,
+    DEFAULT_FILENAME_TEMPLATES,
     DEFAULT_PRIORITY_TAG_CONFIG,
     getMappableBaseModelsDynamic
 } from '../utils/constants.js';
@@ -15,8 +17,34 @@ import { i18n } from '../i18n/index.js';
 import { configureModelCardVideo } from '../components/shared/ModelCard.js';
 import { validatePriorityTagString, getPriorityTagSuggestionsMap, invalidatePriorityTagSuggestionsCache } from '../utils/priorityTagHelpers.js';
 import { bannerService } from './BannerService.js';
+import { directoryPickerModal } from '../components/DirectoryPickerModal.js';
+import { showSidecarMigrationSummary } from '../components/SidecarMigrationSummaryModal.js';
 
 const VALID_MATURE_BLUR_LEVELS = new Set(['PG13', 'R', 'X', 'XXX']);
+
+const PATH_VALIDATION_ERROR_I18N = {
+    path_not_found: { key: 'settings.pathValidation.pathNotFound', fallback: 'Path does not exist' },
+    not_a_directory: { key: 'settings.pathValidation.notADirectory', fallback: 'Not a directory' },
+    not_readable: { key: 'settings.pathValidation.notReadable', fallback: 'Path is not readable' },
+    not_writable: { key: 'settings.pathValidation.notWritable', fallback: 'Path is not writable' },
+};
+
+// Other-model sub_type -> i18n label key, mirroring the checkbox list in
+// templates/components/modals/settings/library.html.
+const OTHER_SUB_TYPE_LABEL_KEYS = {
+    vae: 'settings.folderSettings.subTypeVae',
+    upscaler: 'settings.folderSettings.subTypeUpscaler',
+    text_encoder: 'settings.folderSettings.subTypeTextEncoder',
+    clip_vision: 'settings.folderSettings.subTypeClipVision',
+    controlnet: 'settings.folderSettings.subTypeControlnet',
+};
+
+// Singular filename-template model type -> plural API model type (MODEL_TYPES)
+const FILENAME_TEMPLATE_MODEL_TYPES = {
+    lora: 'loras',
+    checkpoint: 'checkpoints',
+    embedding: 'embeddings',
+};
 
 export class SettingsManager {
     constructor() {
@@ -26,6 +54,8 @@ export class SettingsManager {
         this.availableLibraries = {};
         this.activeLibrary = '';
         this.registeredStartupBannerIds = new Set();
+        this.modelPathsSectionInitialized = false;
+        this.modelPathsDirty = false;
 
         // Add initialization to sync with modal state
         this.currentPage = document.body.dataset.page || 'loras';
@@ -78,6 +108,7 @@ export class SettingsManager {
 
         await this.applyLanguageSetting();
         this.applyFrontendSettings();
+        this.setupModelPathsSection();
     }
 
     async applyLanguageSetting() {
@@ -125,6 +156,25 @@ export class SettingsManager {
         }
 
         merged.download_path_templates = { ...DEFAULT_PATH_TEMPLATES, ...templates };
+
+        let filenameTemplates = backendSettings?.download_filename_templates;
+        if (typeof filenameTemplates === 'string') {
+            try {
+                const parsed = JSON.parse(filenameTemplates);
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    filenameTemplates = parsed;
+                }
+            } catch (parseError) {
+                console.warn('Failed to parse download_filename_templates string from backend, using defaults');
+                filenameTemplates = null;
+            }
+        }
+
+        if (!filenameTemplates || typeof filenameTemplates !== 'object' || Array.isArray(filenameTemplates)) {
+            filenameTemplates = {};
+        }
+
+        merged.download_filename_templates = { ...DEFAULT_FILENAME_TEMPLATES, ...filenameTemplates };
 
         const priorityTags = backendSettings?.priority_tags;
         const normalizedPriority = { ...DEFAULT_PRIORITY_TAG_CONFIG };
@@ -276,6 +326,10 @@ export class SettingsManager {
             case 'open-settings-modal':
                 modalManager.showModal('settingsModal');
                 break;
+            case 'open-model-paths-settings':
+                modalManager.showModal('settingsModal');
+                document.querySelector('.settings-nav-item[data-section="modelPaths"]')?.click();
+                break;
             case 'open-settings-location':
                 this.openSettingsFileLocation();
                 break;
@@ -403,6 +457,30 @@ export class SettingsManager {
             }
         });
 
+        ['lora', 'checkpoint', 'embedding'].forEach(modelType => {
+            const filenameInput = document.getElementById(`${modelType}FilenameTemplate`);
+            if (filenameInput) {
+                filenameInput.addEventListener('input', (e) => {
+                    const template = e.target.value;
+                    settingsManager.validateFilenameTemplate(modelType, template);
+                    settingsManager.updateFilenamePreview(modelType, template);
+                });
+
+                filenameInput.addEventListener('blur', (e) => {
+                    const template = e.target.value;
+                    if (settingsManager.validateFilenameTemplate(modelType, template)) {
+                        settingsManager.updateFilenameTemplate(modelType, template);
+                    }
+                });
+
+                filenameInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.target.blur();
+                    }
+                });
+            }
+        });
+
         const autoOrganizeInput = document.getElementById('autoOrganizeExclusions');
         if (autoOrganizeInput) {
             autoOrganizeInput.addEventListener('keydown', (event) => {
@@ -472,8 +550,11 @@ export class SettingsManager {
                 const sectionId = item.dataset.section;
                 if (!sectionId) return;
 
-                // Hide all sections
-                sections.forEach(section => {
+                // Query live instead of using the captured NodeLists: the
+                // standalone Model Paths section is added after this
+                // initializer runs, and a stale snapshot would leave it
+                // active forever.
+                document.querySelectorAll('.settings-section').forEach(section => {
                     section.classList.remove('active');
                 });
 
@@ -484,7 +565,7 @@ export class SettingsManager {
                 }
 
                 // Update active nav state
-                navItems.forEach(nav => nav.classList.remove('active'));
+                document.querySelectorAll('.settings-nav-item').forEach(nav => nav.classList.remove('active'));
                 item.classList.add('active');
             });
         });
@@ -848,6 +929,7 @@ export class SettingsManager {
 
         // Update API key status display (do NOT pre-fill the input)
         this.updateApiKeyStatus();
+        this.updateHfApiKeyStatus();
         this.updateLlmApiKeyStatus();
 
         // ── AI Provider settings ──────────────────────────────────────
@@ -1047,6 +1129,12 @@ export class SettingsManager {
             groupByModelCheckbox.checked = !!state.global.settings.group_by_model;
         }
 
+        // Set sticky controls
+        const stickyControlsCheckbox = document.getElementById('stickyControls');
+        if (stickyControlsCheckbox) {
+            stickyControlsCheckbox.checked = !!state.global.settings.sticky_controls;
+        }
+
         // Set model name display setting
         const modelNameDisplaySelect = document.getElementById('modelNameDisplay');
         if (modelNameDisplaySelect) {
@@ -1105,8 +1193,14 @@ export class SettingsManager {
 
         this.updateExampleImagesOpenSettingsVisibility();
 
+        // Load sidecar storage settings
+        this.loadSidecarStorageSettings();
+
         // Load download path templates
         this.loadDownloadPathTemplates();
+
+        // Load download filename templates
+        this.loadFilenameTemplates();
 
         // Load priority tag settings
         this.loadPriorityTagSettings();
@@ -1147,8 +1241,15 @@ export class SettingsManager {
         // Load default unet root
         await this.loadUnetRoots();
 
+        // Load default other-model roots (per sub_type)
+        await this.loadOtherRoots();
+        this.updateOtherModelsControls();
+
         // Load extra folder paths
         this.loadExtraFolderPaths();
+
+        // Load standalone model library paths (no-op in plugin mode)
+        this.loadModelPaths();
 
         // Load language setting
         const languageSelect = document.getElementById('languageSelect');
@@ -1165,6 +1266,27 @@ export class SettingsManager {
         if (useNewLicenseIconsCheckbox) {
             useNewLicenseIconsCheckbox.checked = state.global.settings.use_new_license_icons !== false;
         }
+
+        // Directory browse buttons + advisory path validation (idempotent,
+        // safe to call on every modal open).
+        this.attachPathField('recipesPath', {
+            onAfterSelect: () => this.saveInputSetting('recipesPath', 'recipes_path'),
+        });
+        this.attachPathField('exampleImagesPath', {
+            onAfterSelect: (pickedPath) => {
+                // Mirror ExampleImagesManager's blur-save flow.
+                window.exampleImagesManager?.updateDownloadButtonState?.(pickedPath.trim() !== '');
+                this.saveSetting('example_images_path', pickedPath)
+                    .then(() => showToast('toast.exampleImages.pathUpdated', {}, 'success'))
+                    .catch((error) => showToast('toast.exampleImages.pathUpdateFailed', { message: error.message }, 'error'));
+            },
+        });
+        this.attachPathField('exampleImagesLocalRoot', {
+            onAfterSelect: () => this.saveInputSetting('exampleImagesLocalRoot', 'example_images_local_root'),
+        });
+        this.attachPathField('sidecarStoragePath', {
+            onAfterSelect: () => this.handleSidecarStoragePathChange(),
+        });
     }
 
     loadDownloadBackendSettings() {
@@ -1652,6 +1774,51 @@ export class SettingsManager {
         }
     }
 
+    async loadOtherRoots() {
+        const selects = document.querySelectorAll('select[data-other-root-subtype]');
+        if (!selects.length) return;
+
+        try {
+            // Fetch other-model roots grouped by sub_type
+            const response = await fetch('/api/lm/other/roots_by_subtype');
+            if (!response.ok) {
+                throw new Error('Failed to fetch other model roots');
+            }
+
+            const data = await response.json();
+            const groupedRoots = data.roots_by_subtype || {};
+            const defaultRoots = state.global.settings.default_other_roots || {};
+
+            selects.forEach((select) => {
+                const subType = select.dataset.otherRootSubtype;
+                const roots = groupedRoots[subType] || [];
+                if (!roots.length) {
+                    this.showNoRootsPlaceholder(select);
+                    return;
+                }
+
+                select.innerHTML = '';
+                select.disabled = false;
+
+                // Add options for each root
+                roots.forEach(root => {
+                    const option = document.createElement('option');
+                    option.value = root;
+                    option.textContent = root;
+                    select.appendChild(option);
+                });
+
+                const defaultRoot = defaultRoots[subType] || '';
+                select.value = roots.includes(defaultRoot) ? defaultRoot : roots[0];
+            });
+
+        } catch (error) {
+            console.error('Error loading other model roots:', error);
+            selects.forEach((select) => this.showNoRootsPlaceholder(select));
+            showToast('toast.settings.otherRootsFailed', { message: error.message }, 'error');
+        }
+    }
+
     async loadEmbeddingRoots() {
         const defaultEmbeddingRootSelect = document.getElementById('defaultEmbeddingRoot');
         if (!defaultEmbeddingRootSelect) return;
@@ -1728,6 +1895,11 @@ export class SettingsManager {
                        onblur="settingsManager.updateExtraFolderPaths('${modelType}')"
                        onfocus="settingsManager.clearExtraFolderPathError(this)"
                        onkeydown="if(event.key === 'Enter') { this.blur(); }" />
+                <button type="button" class="browse-path-btn"
+                        onclick="settingsManager.browseForPathRow(this, '${modelType}')"
+                        title="${translate('settings.directoryPicker.title', {}, 'Browse Folders')}">
+                    <i class="fas fa-folder-open"></i>
+                </button>
                 <button type="button" class="remove-path-btn"
                         onclick="settingsManager.removeExtraFolderPathRow(this, '${modelType}')"
                         title="${translate('common.actions.delete', {}, 'Delete')}">
@@ -1885,6 +2057,478 @@ export class SettingsManager {
             state.global.settings.extra_folder_paths = currentPaths;
             this.loadExtraFolderPaths();
         }
+    }
+
+    // --- Standalone Model Paths section --------------------------------------
+    // The section only exists in standalone mode, where primary folder_paths
+    // are read from settings.json instead of the ComfyUI host. Editors are
+    // rendered from the backend-provided folder_path_schema so new model
+    // categories appear automatically.
+
+    setupModelPathsSection() {
+        if (this.modelPathsSectionInitialized) return;
+        if (!state.global.settings.standalone_mode) return;
+
+        const navGroup = document.querySelector('.settings-nav-list .settings-nav-group');
+        const settingsForm = document.querySelector('.settings-form');
+        if (!navGroup || !settingsForm) return;
+
+        const navButton = document.createElement('button');
+        navButton.type = 'button';
+        navButton.className = 'settings-nav-item';
+        navButton.dataset.section = 'modelPaths';
+        navButton.textContent = translate('settings.nav.modelPaths', {}, 'Model Paths');
+
+        const section = document.createElement('div');
+        section.className = 'settings-section';
+        section.id = 'section-modelPaths';
+        section.dataset.section = 'modelPaths';
+        section.innerHTML = `
+            <div class="settings-subsection">
+                <div class="settings-subsection-header">
+                    <h4>
+                        ${translate('settings.modelPaths.title', {}, 'Model Library Paths')}
+                        <i class="fas fa-sync-alt restart-required-icon" title="${translate('settings.modelPaths.restartRequired', {}, 'Restart required for changes to take effect')}"></i>
+                    </h4>
+                </div>
+                <div class="setting-item">
+                    <div class="input-help">
+                        ${translate('settings.modelPaths.description', {}, 'Root folders LoRA Manager scans for your models. Changes take effect after restarting the server.')}
+                    </div>
+                </div>
+                <div class="model-paths-restart-notice" id="modelPathsRestartNotice">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span>${translate('settings.modelPaths.pendingRestartNotice', {}, 'Path changes saved. Restart LoRA Manager for them to take effect.')}</span>
+                </div>
+                <div class="settings-subsection-header">
+                    <h4>${translate('settings.modelPaths.coreTypes', {}, 'Core Model Types')}</h4>
+                </div>
+                <div id="modelPathsCoreTypes"></div>
+                <div class="settings-subsection-header">
+                    <h4>${translate('settings.modelPaths.otherTypes', {}, 'Other Model Types')}</h4>
+                </div>
+                <div class="setting-item">
+                    <div class="setting-row">
+                        <div class="setting-info">
+                            <label for="modelPathsEnableOtherModels">
+                                ${translate('settings.folderSettings.enableOtherModels', {}, 'Enable Other Models Management')}
+                                <i class="fas fa-info-circle info-icon" data-tooltip="${translate('settings.folderSettings.enableOtherModelsHelp', {}, '')}"></i>
+                            </label>
+                        </div>
+                        <div class="setting-control">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="modelPathsEnableOtherModels" onchange="settingsManager.handleModelPathsEnableOtherModels()">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="setting-item other-subtype-toggles" id="modelPathsSubTypeToggles">
+                    <div class="setting-row">
+                        <div class="setting-info">
+                            <label>
+                                ${translate('settings.folderSettings.otherSubTypes', {}, 'Enabled Model Types')}
+                                <i class="fas fa-info-circle info-icon" data-tooltip="${translate('settings.folderSettings.otherSubTypesHelp', {}, '')}"></i>
+                            </label>
+                        </div>
+                        <div class="setting-control other-subtype-checkboxes">
+                            ${this._buildModelPathSubTypeCheckboxes()}
+                        </div>
+                    </div>
+                </div>
+                <div class="setting-item" id="modelPathsOtherEmpty">
+                    <div class="input-help">
+                        ${translate('settings.modelPaths.otherTypesDisabledHint', {}, 'No other model types are enabled. Turn on the types you need above to configure their folders.')}
+                    </div>
+                </div>
+                <div id="modelPathsOtherTypes"></div>
+            </div>
+        `;
+
+        // The static nav items were bound by initializeNavigation() before the
+        // backend sync completed, so this dynamically added item carries its
+        // own handler with the same show-section behavior.
+        navButton.addEventListener('click', () => {
+            document.querySelectorAll('.settings-section').forEach((s) => s.classList.remove('active'));
+            section.classList.add('active');
+            document.querySelectorAll('.settings-nav-item').forEach((n) => n.classList.remove('active'));
+            navButton.classList.add('active');
+        });
+
+        navGroup.appendChild(navButton);
+        settingsForm.appendChild(section);
+        this.modelPathsSectionInitialized = true;
+    }
+
+    _buildModelPathSubTypeCheckboxes() {
+        const schema = state.global.settings.folder_path_schema || [];
+        const subTypes = [];
+        schema.forEach((entry) => {
+            if (entry.category === 'other' && entry.sub_type && !subTypes.includes(entry.sub_type)) {
+                subTypes.push(entry.sub_type);
+            }
+        });
+
+        return subTypes.map((subType) => {
+            const labelKey = OTHER_SUB_TYPE_LABEL_KEYS[subType];
+            const label = labelKey ? translate(labelKey, {}, subType) : subType;
+            return `
+                <label class="other-subtype-checkbox">
+                    <input type="checkbox" value="${subType}"
+                           data-model-paths-subtype="${subType}"
+                           onchange="settingsManager.handleModelPathsSubTypeToggles()">
+                    <span>${label}</span>
+                </label>
+            `;
+        }).join('');
+    }
+
+    /**
+     * Master toggle inside the standalone Model Paths section. Edits the same
+     * enable_other_models key as the Library tab control and keeps both in
+     * sync, then re-renders the other-model path editors in place.
+     */
+    async handleModelPathsEnableOtherModels() {
+        const toggle = document.getElementById('modelPathsEnableOtherModels');
+        if (!toggle) return;
+
+        const enabled = toggle.checked;
+        const previous = !!state.global.settings.enable_other_models;
+
+        try {
+            await this.saveSetting('enable_other_models', enabled);
+            // Mirror the Library tab flow: refresh its controls and roots,
+            // then re-render this section's editors immediately.
+            this.updateOtherModelsControls();
+            await this.loadOtherRoots();
+            this.updateOtherModelsControls();
+            this.updateOtherModelsNavVisibility(enabled);
+            this.removeOtherModelsAnnouncement(enabled);
+            this.loadModelPaths();
+            showToast('toast.settings.settingsUpdated', { setting: 'enable other models' }, 'success');
+        } catch (error) {
+            toggle.checked = previous;
+            state.global.settings.enable_other_models = previous;
+            showToast('toast.settings.settingSaveFailed', { message: error.message }, 'error');
+        }
+    }
+
+    /**
+     * Sub-type checkboxes inside the standalone Model Paths section. Saves the
+     * same enabled_other_sub_types allow-list as the Library tab checkboxes
+     * (which use data-other-subtype-toggle, so the two never mix) and
+     * re-renders the editors without requiring a modal reopen.
+     */
+    async handleModelPathsSubTypeToggles() {
+        const values = Array.from(document.querySelectorAll('[data-model-paths-subtype]'))
+            .filter((input) => input.checked)
+            .map((input) => input.value);
+
+        const previous = state.global.settings.enabled_other_sub_types;
+
+        try {
+            await this.saveSetting('enabled_other_sub_types', values);
+            this.updateOtherModelsControls();
+            await this.loadOtherRoots();
+            this.updateOtherModelsControls();
+            this.loadModelPaths();
+            showToast('toast.settings.settingsUpdated', { setting: 'other model types' }, 'success');
+        } catch (error) {
+            state.global.settings.enabled_other_sub_types = previous;
+            this.loadModelPaths();
+            showToast('toast.settings.settingSaveFailed', { message: error.message }, 'error');
+        }
+    }
+
+    loadModelPaths() {
+        if (!state.global.settings.standalone_mode) return;
+
+        const coreHost = document.getElementById('modelPathsCoreTypes');
+        const otherHost = document.getElementById('modelPathsOtherTypes');
+        if (!coreHost || !otherHost) return;
+
+        coreHost.innerHTML = '';
+        otherHost.innerHTML = '';
+
+        const schema = state.global.settings.folder_path_schema || [];
+        const otherModelsEnabled = state.global.settings.enable_other_models === true;
+        const enabledSubTypes = new Set(state.global.settings.enabled_other_sub_types || []);
+
+        // Keep the inline enable controls in sync with the current settings.
+        const masterToggle = document.getElementById('modelPathsEnableOtherModels');
+        if (masterToggle) {
+            masterToggle.checked = otherModelsEnabled;
+        }
+        document.querySelectorAll('[data-model-paths-subtype]').forEach((input) => {
+            input.checked = enabledSubTypes.has(input.value);
+            input.disabled = !otherModelsEnabled;
+        });
+        const subTypeToggles = document.getElementById('modelPathsSubTypeToggles');
+        if (subTypeToggles) {
+            subTypeToggles.classList.toggle('is-disabled', !otherModelsEnabled);
+        }
+
+        let otherCount = 0;
+        schema.forEach((entry) => {
+            if (entry.category === 'core') {
+                this._buildModelPathTypeGroup(coreHost, entry);
+            } else if (otherModelsEnabled && entry.sub_type && enabledSubTypes.has(entry.sub_type)) {
+                otherCount++;
+                this._buildModelPathTypeGroup(otherHost, entry);
+            }
+        });
+
+        const emptyHint = document.getElementById('modelPathsOtherEmpty');
+        if (emptyHint) {
+            emptyHint.style.display = otherCount === 0 ? 'block' : 'none';
+        }
+
+        const folderPaths = state.global.settings.folder_paths || {};
+        schema.forEach((entry) => {
+            const container = document.getElementById(`modelFolderPaths-${entry.key}`);
+            if (!container) return;
+
+            container.innerHTML = '';
+            const paths = folderPaths[entry.key] || [];
+            paths.forEach((path) => {
+                this.addModelFolderPathRow(entry.key, path);
+            });
+            // No trailing empty row on load: an unconfigured type shows just
+            // its Add button, and removing a row never resurrects an empty one.
+        });
+    }
+
+    _buildModelPathTypeGroup(host, entry) {
+        const item = document.createElement('div');
+        item.className = 'setting-item';
+
+        const label = translate(`settings.modelPaths.folderKeys.${entry.key}`, {}, entry.key);
+        item.innerHTML = `
+            <div class="setting-row">
+                <div class="setting-info">
+                    <label>${label}</label>
+                </div>
+                <div class="setting-control">
+                    <button type="button" class="add-mapping-btn" onclick="settingsManager.addModelFolderPathRow('${entry.key}')">
+                        <i class="fas fa-plus"></i>
+                        <span>${translate('common.actions.add', {}, 'Add')}</span>
+                    </button>
+                </div>
+            </div>
+            <div class="extra-folder-paths-container" id="modelFolderPaths-${entry.key}">
+            </div>
+        `;
+
+        host.appendChild(item);
+    }
+
+    addModelFolderPathRow(key, path = '', shouldFocus = true) {
+        const container = document.getElementById(`modelFolderPaths-${key}`);
+        if (!container) return;
+
+        const row = document.createElement('div');
+        row.className = 'extra-folder-path-row mapping-row';
+
+        row.innerHTML = `
+            <div class="path-controls">
+                <input type="text" class="extra-folder-path-input"
+                       placeholder="${translate('settings.extraFolderPaths.pathPlaceholder', {}, '/path/to/models')}" value="${path}"
+                       onblur="settingsManager.updateModelFolderPaths('${key}')"
+                       onfocus="settingsManager.clearModelFolderPathError(this)"
+                       onkeydown="if(event.key === 'Enter') { this.blur(); }" />
+                <button type="button" class="browse-path-btn"
+                        onclick="settingsManager.browseForPathRow(this, '${key}', true)"
+                        title="${translate('settings.directoryPicker.title', {}, 'Browse Folders')}">
+                    <i class="fas fa-folder-open"></i>
+                </button>
+                <button type="button" class="remove-path-btn"
+                        onclick="settingsManager.removeModelFolderPathRow(this, '${key}')"
+                        title="${translate('common.actions.delete', {}, 'Delete')}">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="extra-folder-path-error"></div>
+        `;
+
+        container.appendChild(row);
+
+        if (!path && shouldFocus) {
+            const input = row.querySelector('.extra-folder-path-input');
+            if (input) {
+                setTimeout(() => input.focus(), 0);
+            }
+        }
+    }
+
+    clearModelFolderPathError(input) {
+        input.classList.remove('has-error');
+        const row = input.closest('.extra-folder-path-row');
+        if (row) {
+            const errEl = row.querySelector('.extra-folder-path-error');
+            if (errEl) {
+                errEl.classList.remove('visible');
+                errEl.textContent = '';
+            }
+        }
+    }
+
+    _clearAllModelFolderPathErrors() {
+        const section = document.getElementById('section-modelPaths');
+        if (!section) return;
+        section.querySelectorAll('.extra-folder-path-input.has-error').forEach((input) => {
+            input.classList.remove('has-error');
+        });
+        section.querySelectorAll('.extra-folder-path-error.visible').forEach((el) => {
+            el.classList.remove('visible');
+            el.textContent = '';
+        });
+    }
+
+    _markModelFolderPathsError(key, overlappingPaths, showMessage = false) {
+        const container = document.getElementById(`modelFolderPaths-${key}`);
+        if (!container) return;
+
+        const inputs = container.querySelectorAll('.extra-folder-path-input');
+        inputs.forEach((input) => {
+            const val = input.value.trim();
+            if (val && overlappingPaths.includes(val)) {
+                input.classList.add('has-error');
+                if (showMessage) {
+                    const row = input.closest('.extra-folder-path-row');
+                    if (row) {
+                        const errEl = row.querySelector('.extra-folder-path-error');
+                        if (errEl) {
+                            errEl.textContent = translate('settings.extraFolderPaths.validation.checkpointUnetOverlapInline', {}, 'This path is also used for a different model type. Use separate folders for checkpoints and diffusion models.');
+                            errEl.classList.add('visible');
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    removeModelFolderPathRow(btn, key) {
+        const row = btn.closest('.extra-folder-path-row');
+        if (row) {
+            row.remove();
+            this.updateModelFolderPaths(key, { fromRemoval: true });
+        }
+    }
+
+    async updateModelFolderPaths(changedKey, { fromRemoval = false } = {}) {
+        this._clearAllModelFolderPathErrors();
+
+        const folderPaths = {};
+
+        const section = document.getElementById('section-modelPaths');
+        if (!section) return;
+
+        section.querySelectorAll('.extra-folder-paths-container[id^="modelFolderPaths-"]').forEach((container) => {
+            const key = container.id.slice('modelFolderPaths-'.length);
+            const paths = [];
+            container.querySelectorAll('.extra-folder-path-input').forEach((input) => {
+                const value = input.value.trim();
+                if (value) {
+                    paths.push(value);
+                }
+            });
+            folderPaths[key] = paths;
+        });
+
+        // Client-side pre-check: checkpoints and unet must not share the same path.
+        const normalise = (p) => p.replace(/[/\\]+$/, '').toLowerCase();
+        const ckptSet = new Set((folderPaths.checkpoints || []).map(normalise));
+        const unetSet = new Set((folderPaths.unet || []).map(normalise));
+        const ckptOverlap = (folderPaths.checkpoints || []).filter(p => p && unetSet.has(normalise(p)));
+        const unetOverlap = (folderPaths.unet || []).filter(p => p && ckptSet.has(normalise(p)));
+        const hasOverlap = ckptOverlap.length > 0 || unetOverlap.length > 0;
+
+        if (hasOverlap) {
+            if (changedKey === 'checkpoints') {
+                this._markModelFolderPathsError('checkpoints', ckptOverlap, true);
+                this._markModelFolderPathsError('unet', unetOverlap, false);
+            } else if (changedKey === 'unet') {
+                this._markModelFolderPathsError('unet', unetOverlap, true);
+                this._markModelFolderPathsError('checkpoints', ckptOverlap, false);
+            } else {
+                this._markModelFolderPathsError('checkpoints', ckptOverlap, false);
+                this._markModelFolderPathsError('unet', unetOverlap, false);
+            }
+            return;
+        }
+
+        const currentPaths = state.global.settings.folder_paths || {};
+        const pathsChanged = JSON.stringify(currentPaths) !== JSON.stringify(folderPaths);
+
+        if (!pathsChanged) {
+            return;
+        }
+
+        state.global.settings.folder_paths = folderPaths;
+
+        try {
+            await this.saveSetting('folder_paths', folderPaths);
+
+            // The "model folders need setup" startup banner is obsolete once
+            // at least one folder path is configured.
+            const hasAnyPath = Object.values(folderPaths).some(value => {
+                const list = Array.isArray(value) ? value : [value];
+                return list.some(path => typeof path === 'string' && path.trim());
+            });
+            if (hasAnyPath) {
+                bannerService.removeBannerElement('startup-missing-model-paths');
+            }
+
+            this._markModelPathsDirty();
+            showToast('settings.modelPaths.saveSuccessRestart', {}, 'success');
+
+            // Keep the continuous-add flow: after the user fills the trailing
+            // empty row, append a fresh one — but never after a removal.
+            const container = document.getElementById(`modelFolderPaths-${changedKey}`);
+            if (container && !fromRemoval) {
+                const inputs = container.querySelectorAll('.extra-folder-path-input');
+                const hasEmptyRow = Array.from(inputs).some((input) => !input.value.trim());
+
+                if (!hasEmptyRow) {
+                    this.addModelFolderPathRow(changedKey, '');
+                }
+            }
+        } catch (error) {
+            console.error('Failed to save folder paths:', error);
+            showToast('toast.settings.settingSaveFailed', { message: error.message }, 'error');
+
+            state.global.settings.folder_paths = currentPaths;
+            this.loadModelPaths();
+        }
+    }
+
+    /**
+     * Surface a persistent "restart required" cue after folder_paths changes:
+     * a dot on the Model Paths nav item, an inline notice in the section, and
+     * a global banner. The banner id is unique per change because dismissed
+     * banner ids persist across restarts — reusing one would mute future
+     * reminders. The whole state clears on the next page load (i.e. after the
+     * restart the user was asked to do).
+     */
+    _markModelPathsDirty() {
+        if (this.modelPathsDirty) return;
+        this.modelPathsDirty = true;
+
+        document.querySelector('.settings-nav-item[data-section="modelPaths"]')
+            ?.classList.add('has-pending-restart');
+
+        document.getElementById('modelPathsRestartNotice')?.classList.add('visible');
+
+        const bannerId = `model-paths-restart-${Date.now()}`;
+        bannerService.registerBanner(bannerId, {
+            id: bannerId,
+            title: translate('settings.modelPaths.pendingRestartBannerTitle', {}, 'Restart required to apply path changes'),
+            content: translate('settings.modelPaths.pendingRestartBannerMessage', {}, 'Model library paths were updated. Restart the LoRA Manager server to scan the new folders.'),
+            dismissible: true,
+            // Above startup warnings (60), below startup errors (90): a pending
+            // restart is the most actionable state and should preempt prompts.
+            priority: 80,
+        });
     }
 
     loadBaseModelMappings() {
@@ -2216,6 +2860,218 @@ export class SettingsManager {
         }
     }
 
+    loadFilenameTemplates() {
+        const templates = state.global.settings.download_filename_templates || DEFAULT_FILENAME_TEMPLATES;
+
+        ['lora', 'checkpoint', 'embedding'].forEach(modelType => {
+            const input = document.getElementById(`${modelType}FilenameTemplate`);
+            if (!input) return;
+
+            const template = templates[modelType] || '';
+            input.value = template;
+            this.validateFilenameTemplate(modelType, template);
+            this.updateFilenamePreview(modelType, template);
+        });
+    }
+
+    validateFilenameTemplate(modelType, template) {
+        const validationElement = document.getElementById(`${modelType}FilenameValidation`);
+        if (!validationElement) return true;
+
+        // Reset validation state
+        validationElement.innerHTML = '';
+        validationElement.className = 'template-validation';
+
+        if (!template) {
+            validationElement.innerHTML = `<i class="fas fa-check"></i> ${translate('settings.filenameTemplates.validation.restoreOriginal', {}, 'Valid (empty template restores original filenames)')}`;
+            validationElement.classList.add('valid');
+            return true;
+        }
+
+        // A filename stem cannot contain path separators or OS-illegal characters
+        const invalidChars = /[/\\<>:"|?*]/;
+        if (invalidChars.test(template)) {
+            validationElement.innerHTML = `<i class="fas fa-times"></i> ${translate('settings.filenameTemplates.validation.invalidChars', {}, 'Invalid characters detected (a filename cannot contain / \\ < > : " | ? *)')}`;
+            validationElement.classList.add('invalid');
+            return false;
+        }
+
+        // Extract placeholders
+        const placeholderRegex = /\{([^}]+)\}/g;
+        const matches = template.match(placeholderRegex) || [];
+
+        // Check for invalid placeholders
+        const invalidPlaceholders = matches.filter(match =>
+            !FILENAME_TEMPLATE_PLACEHOLDERS.includes(match)
+        );
+
+        if (invalidPlaceholders.length > 0) {
+            validationElement.innerHTML = `<i class="fas fa-times"></i> ${translate('settings.filenameTemplates.validation.invalidPlaceholder', { placeholder: invalidPlaceholders[0] }, `Invalid placeholder: ${invalidPlaceholders[0]}`)}`;
+            validationElement.classList.add('invalid');
+            return false;
+        }
+
+        // Template is valid
+        validationElement.innerHTML = `<i class="fas fa-check"></i> ${translate('settings.filenameTemplates.validation.validTemplate', {}, 'Valid template')}`;
+        validationElement.classList.add('valid');
+        return true;
+    }
+
+    updateFilenameTemplate(modelType, template) {
+        if (!this.validateFilenameTemplate(modelType, template)) {
+            return; // Don't save invalid templates
+        }
+
+        // Update state
+        if (!state.global.settings.download_filename_templates) {
+            state.global.settings.download_filename_templates = { ...DEFAULT_FILENAME_TEMPLATES };
+        }
+        state.global.settings.download_filename_templates[modelType] = template;
+
+        // Update preview
+        this.updateFilenamePreview(modelType, template);
+
+        // Save settings
+        this.saveFilenameTemplates();
+    }
+
+    updateFilenamePreview(modelType, template) {
+        const previewElement = document.getElementById(`${modelType}FilenamePreview`);
+        if (!previewElement) return;
+
+        if (!template) {
+            // Empty template restores the recorded original filename
+            previewElement.textContent = 'V1.safetensors';
+        } else {
+            const exampleStem = template
+                .replaceAll('{model_name}', 'model-name')
+                .replaceAll('{version_name}', 'v3')
+                .replaceAll('{base_model}', 'Flux.1 D')
+                .replaceAll('{author}', 'authorname')
+                .replaceAll('{first_tag}', 'style')
+                .replaceAll('{hash_short}', 'a1b2c3d4e5')
+                .replaceAll('{original_name}', 'V1');
+            previewElement.textContent = `${exampleStem}.safetensors`;
+        }
+        previewElement.style.display = 'block';
+    }
+
+    async saveFilenameTemplates() {
+        try {
+            // Save to backend using universal save method
+            await this.saveSetting('download_filename_templates', state.global.settings.download_filename_templates);
+
+            showToast('toast.settings.filenameTemplatesUpdated', {}, 'success');
+
+        } catch (error) {
+            console.error('Error saving download filename templates:', error);
+            showToast('toast.settings.filenameTemplatesFailed', { message: error.message }, 'error');
+        }
+    }
+
+    /**
+     * Confirm the bulk apply/revert via a dedicated modal. Self-managed (NOT
+     * through ModalManager): it stacks above the settings modal, and
+     * ModalManager's "close current modal on open" behavior would kill the
+     * settings modal underneath. Resolves true when the user confirms.
+     */
+    confirmFilenameTemplateApply(isRevert) {
+        const modalElement = document.getElementById('filenameTemplateConfirmModal');
+        if (!modalElement) {
+            return Promise.resolve(true);
+        }
+
+        const titleElement = modalElement.querySelector('[data-role="title"]');
+        if (titleElement) {
+            titleElement.textContent = isRevert
+                ? translate('modals.filenameTemplateConfirm.titleRevert', {}, 'Restore original filenames?')
+                : translate('modals.filenameTemplateConfirm.titleApply', {}, 'Apply filename template to library?');
+        }
+
+        const messageElement = modalElement.querySelector('[data-role="message"]');
+        if (messageElement) {
+            messageElement.textContent = isRevert
+                ? translate('settings.filenameTemplates.confirmRevert', {}, 'Restore the recorded original filename for all previously renamed files of this model type? This changes the relative path seen by ComfyUI loaders. Files without a recorded original filename are skipped.')
+                : translate('settings.filenameTemplates.confirmApply', {}, 'Rename all existing files of this model type according to the filename template? This changes the relative path seen by ComfyUI loaders. The original filename is preserved in each model\'s metadata.');
+        }
+
+        const confirmButton = modalElement.querySelector('[data-action="confirm-filename-template"]');
+        const cancelButton = modalElement.querySelector('[data-action="cancel-filename-template"]');
+        if (!confirmButton || !cancelButton) {
+            return Promise.resolve(true);
+        }
+
+        confirmButton.textContent = isRevert
+            ? translate('modals.filenameTemplateConfirm.revertButton', {}, 'Restore Original Filenames')
+            : translate('settings.filenameTemplates.applyButton', {}, 'Apply to Library Now');
+
+        return new Promise((resolve) => {
+            let resolved = false;
+
+            const cleanup = () => {
+                confirmButton.removeEventListener('click', handleConfirm);
+                cancelButton.removeEventListener('click', handleCancel);
+                document.removeEventListener('keydown', handleEscape, true);
+            };
+
+            const finalize = (proceed) => {
+                if (resolved) {
+                    return;
+                }
+                resolved = true;
+                cleanup();
+                modalElement.classList.remove('show');
+                // Keep body.modal-open: the settings modal underneath is still open.
+                resolve(proceed);
+            };
+
+            const handleConfirm = (event) => {
+                event.preventDefault();
+                finalize(true);
+            };
+
+            const handleCancel = (event) => {
+                event.preventDefault();
+                finalize(false);
+            };
+
+            // Capture phase + stopPropagation so ESC never reaches the
+            // settings modal's own ESC handler underneath.
+            const handleEscape = (event) => {
+                if (event.key === 'Escape') {
+                    event.stopPropagation();
+                    finalize(false);
+                }
+            };
+
+            confirmButton.addEventListener('click', handleConfirm);
+            cancelButton.addEventListener('click', handleCancel);
+            document.addEventListener('keydown', handleEscape, true);
+
+            modalElement.classList.add('show');
+            cancelButton.focus();
+        });
+    }
+
+    async applyFilenameTemplate(modelType) {
+        const template = state.global.settings.download_filename_templates?.[modelType] || '';
+        // An empty template reverts renamed models to their recorded original
+        // filename instead of rendering a template.
+        const confirmed = await this.confirmFilenameTemplateApply(!template);
+        if (!confirmed) {
+            return;
+        }
+
+        try {
+            const apiClient = getModelApiClient(FILENAME_TEMPLATE_MODEL_TYPES[modelType]);
+            await apiClient.applyFilenameTemplate();
+            resetAndReload(true);
+        } catch (error) {
+            // The API client already surfaced a toast with the failure reason
+            console.error('Error applying filename template:', error);
+        }
+    }
+
     toggleSettings() {
         if (this.isOpen) {
             modalManager.closeModal('settingsModal');
@@ -2248,6 +3104,16 @@ export class SettingsManager {
 
             if (settingKey === 'backup_auto_enabled') {
                 await this.updateBackupStatus();
+            }
+
+            if (settingKey === 'enable_other_models') {
+                // Roots only exist while the feature is on, so re-fetch them
+                // after the backend rebuilt the other-model root set.
+                this.updateOtherModelsControls();
+                await this.loadOtherRoots();
+                this.updateOtherModelsControls();
+                this.updateOtherModelsNavVisibility(value);
+                this.removeOtherModelsAnnouncement(value);
             }
 
             showToast('toast.settings.settingsUpdated', { setting: settingKey.replace(/_/g, ' ') }, 'success');
@@ -2334,6 +3200,108 @@ export class SettingsManager {
     }
 
     /**
+     * Save one sub_type entry of the default_other_roots dict setting
+     * (read-modify-write: the backend stores the whole mapping).
+     */
+    async saveOtherRootSetting(subType, value) {
+        try {
+            const defaultRoots = { ...(state.global.settings.default_other_roots || {}) };
+            if (value) {
+                defaultRoots[subType] = value;
+            } else {
+                delete defaultRoots[subType];
+            }
+
+            await this.saveSetting('default_other_roots', defaultRoots);
+
+            showToast('toast.settings.settingsUpdated', { setting: `default ${subType} root` }, 'success');
+        } catch (error) {
+            showToast('toast.settings.settingSaveFailed', { message: error.message }, 'error');
+        }
+    }
+
+    /**
+     * Reflect the opt-in Other Models state in the settings UI: the master
+     * toggle gates every sub_type checkbox, and a switched-off sub_type has
+     * its default-root select disabled. Never force-enables a select (the
+     * no-roots placeholder owns that state).
+     */
+    updateOtherModelsControls() {
+        const enableOtherModels = !!state.global.settings.enable_other_models;
+        const enabledSubTypes = new Set(
+            state.global.settings.enabled_other_sub_types
+            || ['vae', 'upscaler', 'text_encoder']
+        );
+
+        const masterToggle = document.getElementById('enableOtherModels');
+        if (masterToggle) {
+            masterToggle.checked = enableOtherModels;
+        }
+
+        document.querySelectorAll('[data-other-subtype-toggle]').forEach((input) => {
+            input.checked = enabledSubTypes.has(input.value);
+            input.disabled = !enableOtherModels;
+        });
+
+        const container = document.getElementById('otherSubTypeToggles');
+        if (container) {
+            container.classList.toggle('is-disabled', !enableOtherModels);
+        }
+
+        document.querySelectorAll('select[data-other-root-subtype]').forEach((select) => {
+            const subType = select.dataset.otherRootSubtype;
+            if (!enableOtherModels || !enabledSubTypes.has(subType)) {
+                select.disabled = true;
+            }
+        });
+    }
+
+    /**
+     * Persist the whole enabled_other_sub_types list (the backend stores an
+     * allow-list) and refresh the per-sub_type default-root selects.
+     */
+    async saveEnabledOtherSubTypes() {
+        const values = Array.from(
+            document.querySelectorAll('[data-other-subtype-toggle]')
+        )
+            .filter((input) => input.checked)
+            .map((input) => input.value);
+
+        try {
+            await this.saveSetting('enabled_other_sub_types', values);
+            this.updateOtherModelsControls();
+            await this.loadOtherRoots();
+            this.updateOtherModelsControls();
+
+            showToast('toast.settings.settingsUpdated', { setting: 'other model types' }, 'success');
+        } catch (error) {
+            showToast('toast.settings.settingSaveFailed', { message: error.message }, 'error');
+        }
+    }
+
+    /**
+     * Show or hide the Other Models nav entry. The nav is server-rendered, so
+     * toggling the class here keeps it in sync when the switch is flipped from
+     * the settings modal (no reload needed).
+     */
+    updateOtherModelsNavVisibility(enabled) {
+        const navItem = document.getElementById('otherNavItem');
+        if (navItem) {
+            navItem.classList.toggle('nav-item--hidden', !enabled);
+        }
+    }
+
+    /**
+     * Drop the Other Models announcement banner once the feature is on.
+     */
+    removeOtherModelsAnnouncement(enabled) {
+        if (!enabled) {
+            return;
+        }
+        bannerService.removeOtherModelsAnnouncement();
+    }
+
+    /**
      * Save the recipes page layout (grid | masonry) and rebuild the scroller.
      * Shared entry point for the settings modal segmented control and the
      * recipes page toolbar toggle; both stay in sync via
@@ -2416,6 +3384,313 @@ export class SettingsManager {
     async handleExampleImagesOpenModeChange() {
         await this.saveSelectSetting('exampleImagesOpenMode', 'example_images_open_mode');
         this.updateExampleImagesOpenSettingsVisibility();
+    }
+
+    loadSidecarStorageSettings() {
+        const currentMode = state.global.settings.sidecar_storage_mode === 'centralized'
+            ? 'centralized'
+            : 'alongside';
+
+        const modeSelect = document.getElementById('sidecarStorageMode');
+        if (modeSelect) {
+            modeSelect.value = currentMode;
+        }
+        // Baseline used to detect a mode change in handleSidecarStorageModeChange
+        this._loadedSidecarStorageMode = currentMode;
+        // Baseline used to detect a root change in handleSidecarStoragePathChange
+        this._loadedSidecarStoragePath = state.global.settings.sidecar_storage_path || '';
+
+        const pathInput = document.getElementById('sidecarStoragePath');
+        if (pathInput) {
+            pathInput.value = state.global.settings.sidecar_storage_path || '';
+        }
+
+        this.renderSidecarStorageInfo();
+        this.updateSidecarStorageVisibility();
+    }
+
+    // Show the backend-resolved storage root (covers the default location,
+    // which the path input leaves blank) plus the portable-mode repo warning.
+    renderSidecarStorageInfo() {
+        const resolvedEl = document.getElementById('sidecarStorageResolvedPath');
+        if (resolvedEl) {
+            resolvedEl.textContent = state.global.settings.sidecar_storage_root || '';
+        }
+        const warningEl = document.getElementById('sidecarStorageRepoWarning');
+        if (warningEl) {
+            warningEl.style.display = state.global.settings.sidecar_storage_root_in_repo
+                ? 'block'
+                : 'none';
+        }
+    }
+
+    // Re-pull just the derived sidecar fields after a path save: the resolved
+    // root is computed server-side (default location, absolutization).
+    async refreshSidecarStorageInfo() {
+        try {
+            const response = await fetch('/api/lm/settings');
+            const data = await response.json();
+            if (data.success && data.settings) {
+                state.global.settings.sidecar_storage_root = data.settings.sidecar_storage_root;
+                state.global.settings.sidecar_storage_root_is_default = data.settings.sidecar_storage_root_is_default;
+                state.global.settings.sidecar_storage_root_in_repo = data.settings.sidecar_storage_root_in_repo;
+            }
+        } catch (error) {
+            console.warn('Failed to refresh sidecar storage info:', error);
+        }
+        this.renderSidecarStorageInfo();
+    }
+
+    async openSidecarStorageLocation() {
+        try {
+            const response = await fetch('/api/lm/sidecars/open-location', {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                throw new Error(`Request failed with status ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            if (data.mode === 'clipboard' && data.path) {
+                try {
+                    await navigator.clipboard.writeText(data.path);
+                    showToast('settings.sidecarStorage.openLocationCopied', { path: data.path }, 'success');
+                } catch (clipboardErr) {
+                    console.warn('Clipboard API not available:', clipboardErr);
+                    showToast('settings.sidecarStorage.openLocationClipboardFallback', { path: data.path }, 'info');
+                }
+            } else {
+                showToast('settings.sidecarStorage.openLocationSuccess', {}, 'success');
+            }
+        } catch (error) {
+            console.error('Failed to open sidecar storage location:', error);
+            showToast('settings.sidecarStorage.openLocationFailed', {}, 'error');
+        }
+    }
+
+    updateSidecarStorageVisibility() {
+        const modeSelect = document.getElementById('sidecarStorageMode');
+        const pathSetting = document.getElementById('sidecarStoragePathSetting');
+        if (!pathSetting) return;
+
+        const mode = modeSelect ? modeSelect.value : state.global.settings.sidecar_storage_mode;
+        pathSetting.style.display = mode === 'centralized' ? 'block' : 'none';
+    }
+
+    async handleSidecarStorageModeChange() {
+        const modeSelect = document.getElementById('sidecarStorageMode');
+        if (!modeSelect) return;
+
+        const previousMode = this._loadedSidecarStorageMode || 'alongside';
+
+        await this.saveSelectSetting('sidecarStorageMode', 'sidecar_storage_mode');
+        this.updateSidecarStorageVisibility();
+
+        const newMode = modeSelect.value;
+        this._loadedSidecarStorageMode = newMode;
+
+        // Existing sidecars are not moved automatically; offer to migrate them.
+        if (newMode !== previousMode) {
+            const direction = newMode === 'centralized' ? 'to_centralized' : 'to_alongside';
+            const confirmed = await this.confirmSidecarMigration(direction);
+            if (confirmed) {
+                await this.migrateSidecars(direction);
+            } else {
+                showToast('settings.sidecarStorage.migrationDeferred', {}, 'info');
+            }
+        }
+    }
+
+    // Path change while centralized storage is active: the assets under the
+    // previous root do not move by themselves, so offer a root relocation.
+    async handleSidecarStoragePathChange() {
+        const pathInput = document.getElementById('sidecarStoragePath');
+        if (!pathInput) return;
+
+        const previousPath = this._loadedSidecarStoragePath || '';
+
+        await this.saveInputSetting('sidecarStoragePath', 'sidecar_storage_path');
+
+        const newPath = pathInput.value.trim();
+        this._loadedSidecarStoragePath = newPath;
+
+        // The resolved root is server-side; refresh before any relocate
+        // confirm so the dialog can name the real destination.
+        await this.refreshSidecarStorageInfo();
+
+        const centralized = state.global.settings.sidecar_storage_mode === 'centralized';
+        if (centralized && previousPath && previousPath !== newPath) {
+            const confirmed = await this.confirmSidecarMigration('relocate_root');
+            if (confirmed) {
+                await this.migrateSidecars('relocate_root', { old_root: previousPath });
+            } else {
+                showToast('settings.sidecarStorage.migrationDeferred', {}, 'info');
+            }
+        }
+    }
+
+    // Entry point for the "Migrate Sidecars Now" button: the direction follows
+    // the currently saved storage mode.
+    async confirmAndMigrateSidecars() {
+        const direction = state.global.settings.sidecar_storage_mode === 'centralized'
+            ? 'to_centralized'
+            : 'to_alongside';
+        const confirmed = await this.confirmSidecarMigration(direction);
+        if (confirmed) {
+            await this.migrateSidecars(direction);
+        }
+    }
+
+    confirmSidecarMigration(direction) {
+        const modalElement = document.getElementById('sidecarMigrationConfirmModal');
+        if (!modalElement) {
+            return Promise.resolve(false);
+        }
+
+        const isToCentralized = direction === 'to_centralized';
+        const isRelocate = direction === 'relocate_root';
+
+        const titleElement = modalElement.querySelector('[data-role="title"]');
+        if (titleElement) {
+            titleElement.textContent = isRelocate
+                ? translate('modals.sidecarMigrationConfirm.titleRelocateRoot', {}, 'Move sidecars to the new storage directory?')
+                : isToCentralized
+                    ? translate('modals.sidecarMigrationConfirm.titleToCentralized', {}, 'Move sidecars to centralized storage?')
+                    : translate('modals.sidecarMigrationConfirm.titleToAlongside', {}, 'Move sidecars back next to model files?');
+        }
+
+        const messageElement = modalElement.querySelector('[data-role="message"]');
+        if (messageElement) {
+            messageElement.textContent = isRelocate
+                ? translate('settings.sidecarStorage.confirmRelocateRoot', {}, 'The centralized storage directory changed, but existing sidecars and preview images are still in the previous directory. Move them to the new directory now?')
+                : isToCentralized
+                    ? translate('settings.sidecarStorage.confirmToCentralized', {}, 'The storage mode changed, but existing .metadata.json sidecars and preview images are not moved automatically. Move them into the centralized storage directory now? You can also do this later with the "Migrate Sidecars Now" button.')
+                    : translate('settings.sidecarStorage.confirmToAlongside', {}, 'The storage mode changed, but existing .metadata.json sidecars and preview images are not moved automatically. Move them back next to their model files now? You can also do this later with the "Migrate Sidecars Now" button.');
+        }
+
+        // Name the destination so users know where the files are going.
+        const destinationElement = modalElement.querySelector('[data-role="destination"]');
+        if (destinationElement) {
+            const resolvedRoot = state.global.settings.sidecar_storage_root || '';
+            if (!isToCentralized && !isRelocate || !resolvedRoot) {
+                destinationElement.style.display = 'none';
+            } else {
+                destinationElement.textContent = translate(
+                    'modals.sidecarMigrationConfirm.destination', { path: resolvedRoot }, `Destination: ${resolvedRoot}`
+                );
+                destinationElement.style.display = 'block';
+            }
+        }
+
+        const confirmButton = modalElement.querySelector('[data-action="confirm-sidecar-migration"]');
+        const cancelButton = modalElement.querySelector('[data-action="cancel-sidecar-migration"]');
+        if (!confirmButton || !cancelButton) {
+            return Promise.resolve(false);
+        }
+
+        confirmButton.textContent = translate('modals.sidecarMigrationConfirm.confirmButton', {}, 'Migrate Now');
+
+        return new Promise((resolve) => {
+            let resolved = false;
+
+            const cleanup = () => {
+                confirmButton.removeEventListener('click', handleConfirm);
+                cancelButton.removeEventListener('click', handleCancel);
+                document.removeEventListener('keydown', handleEscape, true);
+            };
+
+            const finalize = (proceed) => {
+                if (resolved) {
+                    return;
+                }
+                resolved = true;
+                cleanup();
+                modalElement.classList.remove('show');
+                // Keep body.modal-open: the settings modal underneath is still open.
+                resolve(proceed);
+            };
+
+            const handleConfirm = (event) => {
+                event.preventDefault();
+                finalize(true);
+            };
+
+            const handleCancel = (event) => {
+                event.preventDefault();
+                finalize(false);
+            };
+
+            // Capture phase + stopPropagation so ESC never reaches the
+            // settings modal's own ESC handler underneath.
+            const handleEscape = (event) => {
+                if (event.key === 'Escape') {
+                    event.stopPropagation();
+                    finalize(false);
+                }
+            };
+
+            confirmButton.addEventListener('click', handleConfirm);
+            cancelButton.addEventListener('click', handleCancel);
+            document.addEventListener('keydown', handleEscape, true);
+
+            modalElement.classList.add('show');
+            cancelButton.focus();
+        });
+    }
+
+    async migrateSidecars(direction, extraBody = {}) {
+        const migrateBtn = document.getElementById('migrateSidecarsBtn');
+        try {
+            if (migrateBtn) {
+                migrateBtn.disabled = true;
+                migrateBtn.textContent = translate('settings.sidecarStorage.migratingButton', {}, 'Migrating...');
+            }
+
+            state.loadingManager?.showSimpleLoading(
+                translate('settings.sidecarStorage.migrating', {}, 'Migrating sidecars...')
+            );
+
+            const response = await fetch('/api/lm/sidecars/migrate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                // The new mode/path is already saved by the time migration runs,
+                // so the backend guard requires force=true to confirm the
+                // "switch first, then migrate" flow.
+                body: JSON.stringify({ direction, force: true, ...extraBody }),
+            });
+
+            const data = await response.json();
+            if (!response.ok || data.success === false) {
+                throw new Error(data.error || 'Migration failed');
+            }
+
+            state.loadingManager?.hide();
+            this.showSidecarMigrationResult(data);
+        } catch (error) {
+            console.error('Error migrating sidecars:', error);
+            state.loadingManager?.hide();
+            showToast('settings.sidecarStorage.migrateFailed', { message: error.message }, 'error');
+        } finally {
+            if (migrateBtn) {
+                migrateBtn.disabled = false;
+                migrateBtn.textContent = translate('settings.sidecarStorage.migrateButton', {}, 'Migrate Sidecars Now');
+            }
+        }
+    }
+
+    // Post-migration summary: counters + storage location, with an "open
+    // folder" shortcut. Closing reloads so cards pick up the new paths.
+    showSidecarMigrationResult(result) {
+        showSidecarMigrationSummary({
+            result,
+            // Reload so cards pick up metadata/preview paths from the new location
+            onClose: () => resetAndReload(true),
+            // Opening the folder keeps the result modal open; the reload
+            // happens when the user closes it.
+            onOpenLocation: () => this.openSidecarStorageLocation(),
+        });
     }
 
     async loadMetadataArchiveSettings() {
@@ -3119,6 +4394,161 @@ export class SettingsManager {
         }
     }
 
+    // ── Directory picker + live path validation ─────────────────────────
+    // Validation is advisory only: it never blocks or alters save flows.
+
+    attachPathField(inputId, { expect = 'directory', onAfterSelect } = {}) {
+        const input = document.getElementById(inputId);
+        if (!input) {
+            console.warn(`SettingsManager.attachPathField: #${inputId} not found`);
+            return;
+        }
+        if (input.dataset.pathFieldAttached === '1') return;
+        input.dataset.pathFieldAttached = '1';
+
+        const browseBtn = document.createElement('button');
+        browseBtn.type = 'button';
+        browseBtn.className = 'browse-path-btn inset';
+        browseBtn.title = translate('settings.directoryPicker.title', {}, 'Browse Folders');
+        browseBtn.innerHTML = '<i class="fas fa-folder-open"></i>';
+
+        // Inset layout: the button is absolutely positioned inside the right
+        // edge of the input, so the row keeps its original single-control look.
+        const parent = input.parentElement;
+        let wrapper;
+        let statusHost;
+        if (parent && parent.classList.contains('path-control')) {
+            // e.g. #exampleImagesPath sits beside a Download button: wrap only
+            // the input so the button insets into it and Download stays beside it.
+            wrapper = document.createElement('div');
+            wrapper.className = 'text-input-wrapper';
+            parent.insertBefore(wrapper, input);
+            wrapper.appendChild(input);
+            statusHost = parent;
+        } else {
+            // .text-input-wrapper provided by the setting_input macro
+            wrapper = parent;
+            statusHost = parent;
+        }
+        wrapper.appendChild(browseBtn);
+        input.classList.add('has-inset-browse');
+
+        const statusEl = document.createElement('div');
+        statusEl.className = 'path-validation';
+        statusHost.appendChild(statusEl);
+
+        input._pathFieldConfig = { expect, onAfterSelect, statusEl };
+
+        browseBtn.addEventListener('click', () => this.browseForPath(inputId));
+        input.addEventListener('blur', () => {
+            clearTimeout(input._pathValidationTimer);
+            this.validatePath(input, statusEl, expect);
+        });
+        input.addEventListener('input', () => {
+            clearTimeout(input._pathValidationTimer);
+            input._pathValidationTimer = setTimeout(() => {
+                this.validatePath(input, statusEl, expect);
+            }, 500);
+        });
+    }
+
+    async validatePath(input, statusEl, expect = 'directory') {
+        const value = input.value.trim();
+        const seq = input._pathValidationSeq = (input._pathValidationSeq || 0) + 1;
+
+        if (!value) {
+            this._clearPathStatus(statusEl);
+            return;
+        }
+
+        let data;
+        try {
+            const response = await fetch('/api/lm/validate-path', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: value, expect }),
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            data = await response.json();
+        } catch (error) {
+            if (seq === input._pathValidationSeq) {
+                this._clearPathStatus(statusEl);
+            }
+            return;
+        }
+
+        // Ignore responses overtaken by newer input or validation runs.
+        if (seq !== input._pathValidationSeq || input.value.trim() !== value) {
+            return;
+        }
+
+        if (data.success && !data.error_code) {
+            statusEl.innerHTML = `<i class="fas fa-check-circle"></i><span>${translate('settings.pathValidation.valid', {}, 'Path is valid')}</span>`;
+            statusEl.classList.add('visible', 'valid');
+        } else {
+            const message = this._getPathValidationMessage(data);
+            statusEl.innerHTML = '<i class="fas fa-exclamation-circle"></i><span></span>';
+            statusEl.querySelector('span').textContent = message;
+            statusEl.classList.add('visible');
+            statusEl.classList.remove('valid');
+        }
+    }
+
+    _getPathValidationMessage(data) {
+        const entry = PATH_VALIDATION_ERROR_I18N[data?.error_code];
+        if (entry) {
+            return translate(entry.key, {}, entry.fallback);
+        }
+        return data?.error || translate('settings.pathValidation.pathNotFound', {}, 'Path does not exist');
+    }
+
+    _clearPathStatus(statusEl) {
+        statusEl.classList.remove('visible', 'valid');
+        statusEl.textContent = '';
+    }
+
+    browseForPath(inputId, { onAfterSelect } = {}) {
+        const input = document.getElementById(inputId);
+        if (!input) return;
+        const config = input._pathFieldConfig || {};
+        const afterSelect = onAfterSelect || config.onAfterSelect;
+
+        directoryPickerModal.open({
+            initialPath: input.value.trim(),
+            onSelect: (pickedPath) => {
+                input.value = pickedPath;
+                if (config.statusEl) {
+                    this.validatePath(input, config.statusEl, config.expect || 'directory');
+                }
+                if (typeof afterSelect === 'function') {
+                    afterSelect(pickedPath);
+                }
+            },
+        });
+    }
+
+    // Browse variant for the dynamic extra/model folder path rows: picking a
+    // folder routes through the row's existing validation + save logic.
+    browseForPathRow(btn, key, isModelPath = false) {
+        const row = btn.closest('.extra-folder-path-row');
+        const input = row ? row.querySelector('.extra-folder-path-input') : null;
+        if (!input) return;
+
+        directoryPickerModal.open({
+            initialPath: input.value.trim(),
+            onSelect: (pickedPath) => {
+                input.value = pickedPath;
+                if (isModelPath) {
+                    this.updateModelFolderPaths(key);
+                } else {
+                    this.updateExtraFolderPaths(key);
+                }
+            },
+        });
+    }
+
     async saveInputSetting(elementId, settingKey) {
         const element = document.getElementById(elementId);
         if (!element) return;
@@ -3235,6 +4665,28 @@ export class SettingsManager {
         }
     }
 
+    updateHfApiKeyStatus() {
+        const hasKey = !!(state.global.settings.huggingface_api_key_set ||
+                          state.global.settings.huggingface_api_key);
+        const statusText = document.getElementById('huggingfaceApiKeyStatusText');
+        const actionBtn = document.getElementById('huggingfaceApiKeyActionBtn');
+        if (!statusText || !actionBtn) return;
+
+        if (hasKey) {
+            statusText.classList.remove('api-key-status--unconfigured');
+            statusText.classList.add('api-key-status--configured');
+            statusText.innerHTML = '<i class="fas fa-check-circle text-success"></i> '
+                + translate('settings.huggingfaceApiKeyConfigured', {}, 'Configured');
+            actionBtn.textContent = translate('common.actions.change', {}, 'Change');
+        } else {
+            statusText.classList.remove('api-key-status--configured');
+            statusText.classList.add('api-key-status--unconfigured');
+            statusText.innerHTML = '<i class="fas fa-times-circle text-error"></i> '
+                + translate('settings.huggingfaceApiKeyNotConfigured', {}, 'Not configured');
+            actionBtn.textContent = translate('settings.huggingfaceApiKeySet', {}, 'Set up');
+        }
+    }
+
     updateLlmApiKeyStatus() {
         const hasKey = !!(state.global.settings.llm_api_key_set || state.global.settings.llm_api_key);
         const statusText = document.getElementById('llmApiKeyStatusText');
@@ -3282,9 +4734,17 @@ export class SettingsManager {
         const input = document.getElementById(inputId);
         if (input) input.value = '';
         if (!silent) {
-            if (inputId === 'civitaiApiKey') {
-                this.updateApiKeyStatus();
-            }
+            this.refreshApiKeyStatus(inputId);
+        }
+    }
+
+    refreshApiKeyStatus(inputId) {
+        if (inputId === 'civitaiApiKey') {
+            this.updateApiKeyStatus();
+        } else if (inputId === 'huggingfaceApiKey') {
+            this.updateHfApiKeyStatus();
+        } else if (inputId === 'llmApiKey') {
+            this.updateLlmApiKeyStatus();
         }
     }
 
@@ -3294,11 +4754,16 @@ export class SettingsManager {
 
         const value = input.value.trim();
 
+        const labelNames = {
+            civitai_api_key: 'CivitAI API Key',
+            huggingface_api_key: 'Hugging Face Access Token',
+            llm_api_key: 'LLM API Key',
+        };
+
         try {
             await this.saveSetting(settingsKey, value);
-            const labelName = settingsKey === 'civitai_api_key' ? 'CivitAI API Key' : 'LLM API Key';
             showToast('toast.settings.settingsUpdated',
-                { setting: labelName }, 'success');
+                { setting: labelNames[settingsKey] || 'API Key' }, 'success');
         } catch (error) {
             showToast('toast.settings.settingSaveFailed',
                 { message: error.message }, 'error');
@@ -3306,13 +4771,12 @@ export class SettingsManager {
         }
 
         // Update the in-memory flag so the UI reflects the change
-        if (settingsKey === 'civitai_api_key') {
-            state.global.settings.civitai_api_key_set = !!value;
+        const setFlagKey = `${settingsKey}_set`;
+        if (setFlagKey in state.global.settings) {
+            state.global.settings[setFlagKey] = !!value;
         }
         this.cancelEditApiKey(true, inputId);
-        if (inputId === 'civitaiApiKey') {
-            this.updateApiKeyStatus();
-        }
+        this.refreshApiKeyStatus(inputId);
     }
 
     toggleInputVisibility(button) {
@@ -3353,6 +4817,9 @@ export class SettingsManager {
             await resetAndReload(false);
         } else if (this.currentPage === 'embeddings') {
             // Reload the embeddings without updating folders
+            await resetAndReload(false);
+        } else if (this.currentPage === 'other') {
+            // Reload the other models without updating folders
             await resetAndReload(false);
         }
     }
@@ -3395,6 +4862,10 @@ export class SettingsManager {
         // Apply group-by-model mode
         const groupByModel = !!state.global.settings.group_by_model;
         document.body.classList.toggle('group-by-model', groupByModel);
+
+        // Apply sticky controls mode (keeps the action bar visible while scrolling)
+        const stickyControls = !!state.global.settings.sticky_controls;
+        document.body.classList.toggle('sticky-controls', stickyControls);
 
     }
 }

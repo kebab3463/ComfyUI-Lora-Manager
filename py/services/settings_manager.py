@@ -19,19 +19,26 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Set,
     Tuple,
 )
 
 from platformdirs import user_config_dir
 
 from ..utils.constants import (
+    DEFAULT_DOWNLOAD_PATH_TEMPLATES,
+    DEFAULT_ENABLED_OTHER_SUB_TYPES,
     DEFAULT_HASH_CHUNK_SIZE_MB,
     DEFAULT_PRIORITY_TAG_CONFIG,
+    OTHER_SUB_TYPE_FOLDER_KEYS,
     SUPPORTED_DOWNLOAD_SKIP_BASE_MODELS,
+    VALID_OTHER_SUB_TYPES,
+    normalize_other_sub_types,
 )
 from ..utils.preview_selection import VALID_MATURE_BLUR_LEVELS
 from ..utils.settings_paths import (
     APP_NAME,
+    _portable_env_override,
     ensure_settings_file,
     get_legacy_settings_path,
     get_settings_dir_override,
@@ -40,6 +47,8 @@ from ..utils.settings_paths import (
 from ..utils.tag_priorities import (
     PriorityTagEntry,
     collect_canonical_tags,
+    is_civitai_meta_tag,
+    is_usable_path_tag,
     parse_priority_tag_string,
     resolve_priority_tag,
 )
@@ -58,6 +67,7 @@ DEFAULT_KEYS_CLEANUP_THRESHOLD = 10
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "civitai_api_key": "",
+    "huggingface_api_key": "",
     "civitai_host": "civitai.com",
     "download_backend": "python",
     "aria2c_path": "",
@@ -83,9 +93,17 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "default_checkpoint_root": "",
     "default_unet_root": "",
     "default_embedding_root": "",
+    "default_other_roots": {},
+    # Other Models management is opt-in: nothing is scanned, shown or offered
+    # for download until the user turns the feature on.
+    "enable_other_models": False,
+    "enabled_other_sub_types": list(DEFAULT_ENABLED_OTHER_SUB_TYPES),
     "recipes_path": "",
+    "sidecar_storage_mode": "alongside",
+    "sidecar_storage_path": "",
     "base_model_path_mappings": {},
     "download_path_templates": {},
+    "download_filename_templates": {},
     "folder_paths": {},
     "extra_folder_paths": {},
     "example_images_path": "",
@@ -116,6 +134,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "backup_retention_count": 5,
     "use_new_license_icons": True,
     "group_by_model": False,
+    "sticky_controls": False,
     # AI / LLM provider configuration (BYOK)
     "llm_provider": "openai",  # "openai" | "ollama" | "custom"
     "llm_api_key": "",
@@ -161,13 +180,23 @@ class SettingsManager:
         self._check_environment_variables()
         self._collect_configuration_warnings()
 
-        if (
-            os.environ.get("LORA_MANAGER_PORTABLE", "0") == "1"
-            and not is_settings_dir_pinned()
-        ):
+        portable_override = _portable_env_override()
+        if portable_override is True and not is_settings_dir_pinned():
             if not self.settings.get("use_portable_settings"):
                 self.settings["use_portable_settings"] = True
                 self._save_settings()
+        elif portable_override is False and self.settings.get(
+            "use_portable_settings"
+        ):
+            # Explicit opt-out from a persisted portable mode: clear the flag so
+            # later runs go back to the shared settings directory instead of
+            # requiring a manual edit of settings.json.
+            logger.info(
+                "Clearing the persisted portable-mode flag because %s=0",
+                "LORA_MANAGER_PORTABLE",
+            )
+            self.settings["use_portable_settings"] = False
+            self._save_settings()
 
         if self._needs_initial_save:
             self._save_settings()
@@ -286,6 +315,29 @@ class SettingsManager:
 
         return payload == template
 
+    def get_template_folder_path_placeholders(self) -> Set[str]:
+        """Placeholder folder_paths values shipped in settings.json.example.
+
+        A fresh standalone install is seeded from the template, so its
+        documentation-only placeholder paths end up in the live settings
+        file. The Model Paths settings UI hides them; the first real save
+        overwrites them via ``set("folder_paths")``.
+        """
+
+        template = self._read_template_payload()
+        if not template:
+            return set()
+
+        folder_paths = template.get("folder_paths")
+        if not isinstance(folder_paths, Mapping):
+            return set()
+
+        placeholders: Set[str] = set()
+        for value in folder_paths.values():
+            paths = value if isinstance(value, list) else [value]
+            placeholders.update(p for p in paths if isinstance(p, str) and p)
+        return placeholders
+
     def _merge_template_with_defaults(
         self, defaults: Dict[str, Any], template: Mapping[str, Any]
     ) -> Dict[str, Any]:
@@ -308,6 +360,7 @@ class SettingsManager:
                 default_checkpoint_root=merged.get("default_checkpoint_root"),
                 default_unet_root=merged.get("default_unet_root"),
                 default_embedding_root=merged.get("default_embedding_root"),
+                default_other_roots=merged.get("default_other_roots"),
                 recipes_path=merged.get("recipes_path"),
             )
         }
@@ -442,6 +495,7 @@ class SettingsManager:
                 ),
                 default_unet_root=self.settings.get("default_unet_root", ""),
                 default_embedding_root=self.settings.get("default_embedding_root", ""),
+                default_other_roots=self.settings.get("default_other_roots"),
                 recipes_path=self.settings.get("recipes_path", ""),
             )
             libraries = {library_name: library_payload}
@@ -493,6 +547,7 @@ class SettingsManager:
                 default_checkpoint_root=data.get("default_checkpoint_root"),
                 default_unet_root=data.get("default_unet_root"),
                 default_embedding_root=data.get("default_embedding_root"),
+                default_other_roots=data.get("default_other_roots"),
                 recipes_path=data.get("recipes_path"),
                 metadata=data.get("metadata"),
                 base=data,
@@ -540,6 +595,9 @@ class SettingsManager:
         self.settings["default_embedding_root"] = active_library.get(
             "default_embedding_root", ""
         )
+        self.settings["default_other_roots"] = self._normalize_default_other_roots(
+            active_library.get("default_other_roots", {})
+        )
         self.settings["recipes_path"] = active_library.get("recipes_path", "")
 
         if save:
@@ -557,6 +615,7 @@ class SettingsManager:
         default_checkpoint_root: Optional[str] = None,
         default_unet_root: Optional[str] = None,
         default_embedding_root: Optional[str] = None,
+        default_other_roots: Optional[Mapping[str, str]] = None,
         recipes_path: Optional[str] = None,
         metadata: Optional[Mapping[str, Any]] = None,
         base: Optional[Mapping[str, Any]] = None,
@@ -596,6 +655,15 @@ class SettingsManager:
         else:
             payload.setdefault("default_embedding_root", "")
 
+        if default_other_roots is not None:
+            payload["default_other_roots"] = self._normalize_default_other_roots(
+                default_other_roots
+            )
+        else:
+            payload["default_other_roots"] = self._normalize_default_other_roots(
+                payload.get("default_other_roots", {})
+            )
+
         if recipes_path is not None:
             payload["recipes_path"] = recipes_path
         else:
@@ -630,6 +698,71 @@ class SettingsManager:
                     seen.add(stripped)
             normalized[key] = cleaned
         return normalized
+
+    def _normalize_default_other_roots(
+        self, value: Any, *, strict: bool = False
+    ) -> Dict[str, str]:
+        """Normalize a ``default_other_roots`` mapping ({sub_type: root path}).
+
+        Unknown sub_type keys and non-string/empty paths are dropped; with
+        ``strict=True`` unknown sub_type keys raise instead (used by ``set()``
+        so typos in API payloads surface as errors).
+        """
+        if not isinstance(value, Mapping):
+            if strict and value is not None:
+                raise ValueError("default_other_roots must be a mapping")
+            return {}
+        normalized: Dict[str, str] = {}
+        for sub_type, path in value.items():
+            if sub_type not in VALID_OTHER_SUB_TYPES:
+                if strict:
+                    raise ValueError(
+                        f"Unknown other-model sub-type '{sub_type}'; "
+                        f"expected one of {sorted(VALID_OTHER_SUB_TYPES)}"
+                    )
+                continue
+            if not isinstance(path, str):
+                continue
+            stripped = path.strip()
+            if stripped:
+                normalized[sub_type] = stripped
+        return normalized
+
+    def is_other_models_enabled(self) -> bool:
+        """Return True when the opt-in Other Models management is enabled."""
+        return bool(self.settings.get("enable_other_models", False))
+
+    def get_enabled_other_sub_types(self) -> List[str]:
+        """Return the enabled other-model sub_types (empty when the feature is off)."""
+        if not self.is_other_models_enabled():
+            return []
+        return normalize_other_sub_types(self.settings.get("enabled_other_sub_types"))
+
+    def is_other_sub_type_enabled(self, sub_type: Optional[str]) -> bool:
+        """Return True when ``sub_type`` is currently managed."""
+        if not sub_type:
+            return False
+        return sub_type in self.get_enabled_other_sub_types()
+
+    def _apply_other_model_settings_change(self) -> None:
+        """Rebuild other-model roots and refresh the other scanner after a toggle."""
+        try:
+            from ..config import config  # Local import to avoid circular dependency
+
+            config.refresh_other_roots()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("Failed to refresh other-model roots: %s", exc)
+
+        try:
+            from .service_registry import ServiceRegistry  # pyright: ignore[reportImportCycles]
+
+            scanner = ServiceRegistry.get_service_sync("other_scanner")
+            if scanner is not None and hasattr(scanner, "on_library_changed"):
+                # reconcile=True lets the scanner pick up newly enabled roots and
+                # purge rows for folders that are no longer managed.
+                scanner.on_library_changed(reconcile=True)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("Failed to refresh other scanner after settings change: %s", exc)
 
     def _has_configured_paths(self, folder_paths: Any) -> bool:
         if not isinstance(folder_paths, Mapping):
@@ -743,6 +876,7 @@ class SettingsManager:
         default_checkpoint_root: Optional[str] = None,
         default_unet_root: Optional[str] = None,
         default_embedding_root: Optional[str] = None,
+        default_other_roots: Optional[Mapping[str, str]] = None,
         recipes_path: Optional[str] = None,
     ) -> bool:
         libraries = self.settings.get("libraries", {})
@@ -792,6 +926,14 @@ class SettingsManager:
         ):
             library["default_embedding_root"] = default_embedding_root
             changed = True
+
+        if default_other_roots is not None:
+            normalized_other_roots = self._normalize_default_other_roots(
+                default_other_roots
+            )
+            if library.get("default_other_roots") != normalized_other_roots:
+                library["default_other_roots"] = normalized_other_roots
+                changed = True
 
         if recipes_path is not None and library.get("recipes_path") != recipes_path:
             library["recipes_path"] = recipes_path
@@ -893,12 +1035,53 @@ class SettingsManager:
         updated = _check_and_auto_set("unet", "default_unet_root") or updated
         updated = _check_and_auto_set("embeddings", "default_embedding_root") or updated
 
+        # Other-model default roots: one entry per enabled sub_type; candidates
+        # are the union of that sub_type's folder_paths keys (text_encoder
+        # merges the legacy 'clip' key with 'text_encoders'). When the opt-in
+        # feature is off the existing mapping is left untouched.
+        other_roots = self._normalize_default_other_roots(
+            self.settings.get("default_other_roots")
+        )
+        if self.is_other_models_enabled():
+            for sub_type in self.get_enabled_other_sub_types():
+                candidates: List[str] = []
+                candidate_identities: set[str] = set()
+                for folder_key in OTHER_SUB_TYPE_FOLDER_KEYS.get(sub_type, []):
+                    for candidate in self._get_valid_root_candidates(folder_key):
+                        identity = _normalize_root_identity(candidate)
+                        if identity in candidate_identities:
+                            continue
+                        candidate_identities.add(identity)
+                        candidates.append(candidate)
+                if not candidates:
+                    continue
+                current = other_roots.get(sub_type, "")
+                if current and _normalize_root_identity(current) in candidate_identities:
+                    continue
+                other_roots[sub_type] = candidates[0]
+                if current:
+                    logger.info(
+                        "Repaired stale default_other_roots[%s] from '%s' to '%s' because it is not present in primary or extra roots",
+                        sub_type,
+                        current,
+                        candidates[0],
+                    )
+                else:
+                    logger.info(
+                        "Auto-set default_other_roots[%s] to '%s'",
+                        sub_type,
+                        candidates[0],
+                    )
+                updated = True
+
         if updated:
+            self.settings["default_other_roots"] = other_roots
             self._update_active_library_entry(
                 default_lora_root=self.settings.get("default_lora_root"),
                 default_checkpoint_root=self.settings.get("default_checkpoint_root"),
                 default_unet_root=self.settings.get("default_unet_root"),
                 default_embedding_root=self.settings.get("default_embedding_root"),
+                default_other_roots=other_roots,
             )
             if self._bootstrap_reason == "missing":
                 self._needs_initial_save = True
@@ -942,6 +1125,15 @@ class SettingsManager:
             logger.info("Found CIVITAI_API_KEY environment variable")
             # Always use the environment variable if it exists
             self.settings["civitai_api_key"] = env_api_key
+            self._save_settings()
+
+        # Hugging Face accepts either of its conventional variable names
+        env_hf_token = os.environ.get("HF_TOKEN") or os.environ.get(
+            "HUGGING_FACE_HUB_TOKEN"
+        )
+        if env_hf_token:
+            logger.info("Found HF_TOKEN environment variable")
+            self.settings["huggingface_api_key"] = env_hf_token
             self._save_settings()
 
         # LLM provider overrides
@@ -1066,19 +1258,27 @@ class SettingsManager:
             if self._bootstrap_reason == "missing":
                 message = (
                     "LoRA Manager created a default settings.json because no configuration was found. "
-                    "Edit settings.json to add your model directories so library scanning can run."
+                    "Open Settings → Model Paths to add your model directories so library scanning can run."
                 )
             else:
                 message = (
                     "LoRA Manager could not locate any configured model directories. "
-                    "Edit settings.json to add your model folders so library scanning can run."
+                    "Open Settings → Model Paths to add your model folders so library scanning can run."
                 )
             self._add_startup_message(
                 code="missing-model-paths",
                 title="Model folders need setup",
                 message=message,
                 severity="warning",
-                actions=self._default_settings_actions(),
+                actions=[
+                    {
+                        "action": "open-model-paths-settings",
+                        "label": "Configure model folders",
+                        "type": "primary",
+                        "icon": "fas fa-cog",
+                    },
+                    *self._default_settings_actions(),
+                ],
                 dismissible=False,
             )
 
@@ -1091,6 +1291,7 @@ class SettingsManager:
         defaults = copy.deepcopy(DEFAULT_SETTINGS)
         defaults["base_model_path_mappings"] = {}
         defaults["download_path_templates"] = {}
+        defaults["download_filename_templates"] = {}
         defaults["priority_tags"] = DEFAULT_PRIORITY_TAG_CONFIG.copy()
         defaults.setdefault("folder_paths", {})
         defaults.setdefault("extra_folder_paths", {})
@@ -1382,9 +1583,15 @@ class SettingsManager:
         if resolved:
             return resolved
 
+        # Fall back to the first tag that is usable as a folder name. The raw
+        # tag list can contain keyword dumps that would become unusable folders
+        # and break path length limits, and Civitai mixes in structural labels
+        # like "base model" that mean nothing as a folder, so skip both (#1119).
         for tag in tags:
-            if isinstance(tag, str) and tag:
-                return tag
+            if is_civitai_meta_tag(tag):
+                continue
+            if is_usable_path_tag(tag):
+                return tag.strip()
         return ""
 
     def get_priority_tag_suggestions(self) -> Dict[str, List[str]]:
@@ -1411,9 +1618,30 @@ class SettingsManager:
 
         return os.path.abspath(os.path.normpath(os.path.expanduser(stripped)))
 
+    @staticmethod
+    def _normalize_sidecar_storage_mode(value: Any) -> str:
+        """Return a valid sidecar storage mode, falling back to ``alongside``."""
+
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("alongside", "centralized"):
+                return normalized
+        return "alongside"
+
+    def _refresh_sidecar_storage_config(self) -> None:
+        """Rebuild dependent config state after sidecar storage settings change."""
+
+        try:
+            from ..config import config  # Local import to avoid circular dependency
+
+            config.refresh_preview_roots()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug(
+                "Failed to refresh config after sidecar storage change: %s", exc
+            )
+
     def _get_effective_recipes_dir(self, recipes_path: Optional[str] = None) -> str:
         """Resolve the effective recipes directory for the active library."""
-
         normalized_custom = self._normalize_recipes_path_value(
             self.settings.get("recipes_path", "")
             if recipes_path is None
@@ -1598,12 +1826,22 @@ class SettingsManager:
             value = self.normalize_download_skip_base_models(value)
         elif key == "mature_blur_level":
             value = self.normalize_mature_blur_level(value)
+        elif key == "default_other_roots":
+            value = self._normalize_default_other_roots(value, strict=True)
+        elif key == "enabled_other_sub_types":
+            value = normalize_other_sub_types(value)
+        elif key == "enable_other_models":
+            value = bool(value)
         elif key == "recipes_path":
             current_recipes_dir = self._get_effective_recipes_dir()
             value = self._normalize_recipes_path_value(value)
             target_recipes_dir = self._get_effective_recipes_dir(value)
             self._validate_recipes_storage_path(target_recipes_dir)
             self._migrate_recipes_directory(current_recipes_dir, target_recipes_dir)
+        elif key == "sidecar_storage_mode":
+            value = self._normalize_sidecar_storage_mode(value)
+        elif key == "sidecar_storage_path":
+            value = self._normalize_recipes_path_value(value)
         self.settings[key] = value
         portable_switch_pending = False
         if key == "use_portable_settings" and isinstance(value, bool):
@@ -1625,6 +1863,8 @@ class SettingsManager:
             self._update_active_library_entry(default_unet_root=str(value))
         elif key == "default_embedding_root":
             self._update_active_library_entry(default_embedding_root=str(value))
+        elif key == "default_other_roots":
+            self._update_active_library_entry(default_other_roots=value)
         elif key == "recipes_path":
             self._update_active_library_entry(recipes_path=str(value))
         elif key == "model_name_display":
@@ -1632,6 +1872,10 @@ class SettingsManager:
         self._save_settings()
         if key == "recipes_path":
             self._notify_library_change(self.get_active_library_name())
+        if key in ("sidecar_storage_mode", "sidecar_storage_path"):
+            self._refresh_sidecar_storage_config()
+        if key in ("enable_other_models", "enabled_other_sub_types"):
+            self._apply_other_model_settings_change()
         if portable_switch_pending:
             self._finalize_portable_switch()
 
@@ -1795,6 +2039,7 @@ class SettingsManager:
             "lora_scanner",
             "checkpoint_scanner",
             "embedding_scanner",
+            "other_scanner",
             "recipe_scanner",
         ):
             service = ServiceRegistry.get_service_sync(service_name)
@@ -1959,6 +2204,7 @@ class SettingsManager:
         default_checkpoint_root: Optional[str] = None,
         default_unet_root: Optional[str] = None,
         default_embedding_root: Optional[str] = None,
+        default_other_roots: Optional[Mapping[str, str]] = None,
         recipes_path: Optional[str] = None,
         metadata: Optional[Mapping[str, Any]] = None,
         activate: bool = False,
@@ -2003,6 +2249,11 @@ class SettingsManager:
                 if default_embedding_root is not None
                 else existing.get("default_embedding_root")
             ),
+            default_other_roots=(
+                default_other_roots
+                if default_other_roots is not None
+                else existing.get("default_other_roots")
+            ),
             recipes_path=(
                 recipes_path
                 if recipes_path is not None
@@ -2035,6 +2286,7 @@ class SettingsManager:
         default_checkpoint_root: str = "",
         default_unet_root: str = "",
         default_embedding_root: str = "",
+        default_other_roots: Optional[Mapping[str, str]] = None,
         recipes_path: str = "",
         metadata: Optional[Mapping[str, Any]] = None,
         activate: bool = False,
@@ -2053,6 +2305,7 @@ class SettingsManager:
             default_checkpoint_root=default_checkpoint_root,
             default_unet_root=default_unet_root,
             default_embedding_root=default_embedding_root,
+            default_other_roots=default_other_roots,
             recipes_path=recipes_path,
             metadata=metadata,
             activate=activate,
@@ -2113,6 +2366,7 @@ class SettingsManager:
         default_checkpoint_root: Optional[str] = None,
         default_unet_root: Optional[str] = None,
         default_embedding_root: Optional[str] = None,
+        default_other_roots: Optional[Mapping[str, str]] = None,
         recipes_path: Optional[str] = None,
     ) -> None:
         """Update folder paths for the active library."""
@@ -2126,6 +2380,7 @@ class SettingsManager:
             default_checkpoint_root=default_checkpoint_root,
             default_unet_root=default_unet_root,
             default_embedding_root=default_embedding_root,
+            default_other_roots=default_other_roots,
             recipes_path=recipes_path,
             activate=True,
         )
@@ -2150,6 +2405,7 @@ class SettingsManager:
                 "lora_scanner",
                 "checkpoint_scanner",
                 "embedding_scanner",
+                "other_scanner",
                 "recipe_scanner",
                 "model_update_service",
             ):
@@ -2172,10 +2428,14 @@ class SettingsManager:
         """Get download path template for specific model type
 
         Args:
-            model_type: The type of model ('lora', 'checkpoint', 'embedding')
+            model_type: The type of model ('lora', 'checkpoint', 'embedding',
+                'other')
 
         Returns:
-            Template string for the model type, defaults to '{base_model}/{first_tag}'
+            Template string for the model type. Falls back to the per-type
+            default in ``DEFAULT_DOWNLOAD_PATH_TEMPLATES``; unknown model types
+            resolve to an empty string (flat layout) rather than silently
+            nesting downloads under an unconfigured subfolder.
         """
         templates = self.settings.get("download_path_templates", {})
 
@@ -2199,27 +2459,62 @@ class SettingsManager:
                 logger.warning(
                     f"Failed to parse download_path_templates JSON string: {e}. Setting default values."
                 )
-                default_template = "{base_model}/{first_tag}"
-                templates = {
-                    "lora": default_template,
-                    "checkpoint": default_template,
-                    "embedding": default_template,
-                }
+                templates = dict(DEFAULT_DOWNLOAD_PATH_TEMPLATES)
                 self.settings["download_path_templates"] = templates
                 self._save_settings()
 
         # Ensure templates is a dictionary
         if not isinstance(templates, dict):
-            default_template = "{base_model}/{first_tag}"
-            templates = {
-                "lora": default_template,
-                "checkpoint": default_template,
-                "embedding": default_template,
-            }
+            templates = dict(DEFAULT_DOWNLOAD_PATH_TEMPLATES)
             self.settings["download_path_templates"] = templates
             self._save_settings()
 
-        return templates.get(model_type, "{base_model}/{first_tag}")
+        return templates.get(
+            model_type, DEFAULT_DOWNLOAD_PATH_TEMPLATES.get(model_type, "")
+        )
+
+    def get_download_filename_template(self, model_type: str) -> str:
+        """Get the download filename template for a specific model type.
+
+        Args:
+            model_type: The type of model ('lora', 'checkpoint', 'embedding',
+                'other')
+
+        Returns:
+            Template string for the model type. Empty string (the default for
+            every model type) means downloaded files keep their original
+            filename.
+        """
+        templates = self.settings.get("download_filename_templates", {})
+
+        # Handle edge case where templates might be stored as JSON string
+        if isinstance(templates, str):
+            try:
+                parsed_templates = json.loads(templates)
+                if isinstance(parsed_templates, dict):
+                    self.settings["download_filename_templates"] = parsed_templates
+                    self._save_settings()
+                    templates = parsed_templates
+                    logger.info(
+                        "Successfully parsed download_filename_templates from JSON string"
+                    )
+                else:
+                    raise ValueError("Parsed JSON is not a dictionary")
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(
+                    f"Failed to parse download_filename_templates JSON string: {e}. Resetting to empty templates."
+                )
+                templates = {}
+                self.settings["download_filename_templates"] = templates
+                self._save_settings()
+
+        if not isinstance(templates, dict):
+            templates = {}
+            self.settings["download_filename_templates"] = templates
+            self._save_settings()
+
+        template = templates.get(model_type, "")
+        return template if isinstance(template, str) else ""
 
 
 _SETTINGS_MANAGER: Optional["SettingsManager"] = None

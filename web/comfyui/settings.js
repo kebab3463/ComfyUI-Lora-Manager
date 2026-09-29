@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { lmUrl } from "./base_path.js";
 
 // ============================================================================
 // Setting IDs and Defaults
@@ -55,7 +56,7 @@ const loadWorkflowOptions = async () => {
         return;
     }
     try {
-        const response = await fetch("/api/lm/example-workflows");
+        const response = await fetch(lmUrl("/api/lm/example-workflows"));
         const data = await response.json();
         if (data.success && data.workflows) {
             workflowOptionsFull = data.workflows;
@@ -81,7 +82,7 @@ const loadTemplateWorkflow = async (templateName) => {
         const workflow = workflowOptionsFull.find((w) => w.label === templateName);
         if (workflow && workflow.value) {
             const workflowResponse = await fetch(
-                `/api/lm/example-workflows/${encodeURIComponent(workflow.value)}`
+                lmUrl(`/api/lm/example-workflows/${encodeURIComponent(workflow.value)}`)
             );
             const workflowData = await workflowResponse.json();
             if (workflowData.success && workflowData.workflow) {
@@ -450,7 +451,7 @@ app.registerExtension({
             name: "Search LoRA autocomplete within active filters",
             type: "boolean",
             defaultValue: LORA_ACTIVE_FILTERS_AUTOCOMPLETE_DEFAULT,
-            tooltip: "When enabled, LoRA autocomplete suggestions respect the active filters (folder/base model/tags) set in the LoRA Manager page. Commands /activefilters and /noactivefilters toggle this mode.",
+            tooltip: "When enabled, LoRA autocomplete suggestions respect the active filters (folder/base model/tags) set in the LoRA Manager page. You can also toggle it by typing /activefilters or /noactivefilters in the LoRA field, or from the node's right-click menu.",
             category: ["LoRA Manager", "Autocomplete", "LoRA Active Filters"],
         },
         {
@@ -597,6 +598,7 @@ app.registerExtension({
 
 export {
     PROMPT_TAG_AUTOCOMPLETE_SETTING_ID,
+    LORA_ACTIVE_FILTERS_AUTOCOMPLETE_SETTING_ID,
     getWheelSensitivity,
     getAutoPathCorrectionPreference,
     getAutocompleteAppendCommaPreference,

@@ -7,7 +7,7 @@ import logging
 import os
 import time
 
-from ..utils.constants import VALID_LORA_SUB_TYPES, VALID_CHECKPOINT_SUB_TYPES
+from ..utils.constants import VALID_LORA_SUB_TYPES, VALID_CHECKPOINT_SUB_TYPES, VALID_OTHER_SUB_TYPES
 from ..utils.models import BaseModelMetadata
 from ..utils.metadata_manager import MetadataManager
 from ..utils.usage_stats import UsageStats
@@ -22,6 +22,7 @@ from .model_query import (
 )
 from .model_cache import get_civitai_stat
 from .settings_manager import get_settings_manager
+from .model_sources import source_group_key
 from ..utils.civitai_utils import build_civitai_model_page_url
 
 logger = logging.getLogger(__name__)
@@ -752,17 +753,15 @@ class BaseModelService(ABC):
         return annotated
 
     @staticmethod
-    def _extract_hf_group_key(item: Dict[str, Any]) -> Optional[str]:
-        """Extract `hf:{owner}/{repo}` from item's ``hf_url``, or None."""
-        hf_url = item.get("hf_url") if isinstance(item, dict) else None
-        if not hf_url or not isinstance(hf_url, str):
-            return None
-        m = re.match(
-            r"https?://huggingface\.co/([^/]+/[^/]+)", hf_url.strip()
-        )
-        if not m:
-            return None
-        return f"hf:{m.group(1)}"
+    def _extract_source_group_key(item: Dict[str, Any]) -> Optional[str]:
+        """Return the external-source group key for *item*, or None.
+
+        Only sources with a site-native model identity yield a key:
+        ModelScope groups by its published-model id (``ms:{id}``), TensorArt
+        by its numeric model id (``ta:{id}``); Hugging Face models never
+        group (see :meth:`ModelSource.group_key`).
+        """
+        return source_group_key(item)
 
     async def find_group_siblings(self, file_path: str) -> List[Dict[str, Any]]:
         """Return every cached version grouped with *file_path*, itself included.
@@ -801,17 +800,18 @@ class BaseModelService(ABC):
 
     @staticmethod
     def _extract_group_key(item: Dict[str, Any]) -> Union[int, str, None]:
-        """Return the group identity key: CivitAI modelId (int) or HF repo (str).
+        """Return the group identity key.
 
         Preference order:
         1. CivitAI ``modelId`` (int)
-        2. HF repo identity ``hf:{owner}/{repo}`` (str)
+        2. External model source identity, e.g. ``ms:{model_id}``,
+           ``ta:{model_id}`` (str)
         3. ``None`` (no known grouping source)
         """
         mid = BaseModelService._extract_model_id(item)
         if mid is not None:
             return mid
-        return BaseModelService._extract_hf_group_key(item)
+        return BaseModelService._extract_source_group_key(item)
 
     @staticmethod
     def _extract_model_id(item: Dict[str, Any]) -> Optional[int]:
@@ -949,6 +949,11 @@ class BaseModelService(ABC):
             if (
                 self.model_type == "checkpoint"
                 and normalized_type not in VALID_CHECKPOINT_SUB_TYPES
+            ):
+                continue
+            if (
+                self.model_type == "other"
+                and normalized_type not in VALID_OTHER_SUB_TYPES
             ):
                 continue
 

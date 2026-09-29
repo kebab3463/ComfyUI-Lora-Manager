@@ -37,16 +37,22 @@ from ...services.use_cases import (
     DownloadModelEarlyAccessError,
     DownloadModelUseCase,
     DownloadModelValidationError,
+    FilenameTemplateUseCase,
     MetadataRefreshProgressReporter,
     RefreshModelStatsUseCase,
 )
 from ...services.websocket_manager import WebSocketManager
-from ...services.websocket_progress_callback import WebSocketProgressCallback
+from ...services.websocket_progress_callback import (
+    WebSocketFilenameTemplateProgressCallback,
+    WebSocketProgressCallback,
+)
 from ...services.download_queue_service import DownloadQueueService
 from ...services.errors import RateLimitError, ResourceNotFoundError
 from ...utils.civitai_utils import resolve_license_payload
 from ...utils.file_utils import calculate_sha256
 from ...utils.metadata_manager import MetadataManager
+from ...utils.sidecar_paths import get_metadata_path
+from ...utils.url_utils import relative_root_prefix
 
 # A scoped stats refresh acts on the whole filtered set rather than one page,
 # so it asks get_paginated_data for a single page large enough to hold it.
@@ -95,6 +101,7 @@ class ModelPageView:
         settings_service: SettingsManager,
         server_i18n,
         logger: logging.Logger,
+        page_context_provider: Callable[[web.Request], Dict[str, Any]] | None = None,
     ) -> None:
         self._template_env = template_env
         self._template_name = template_name
@@ -102,6 +109,7 @@ class ModelPageView:
         self._settings = settings_service
         self._server_i18n = server_i18n
         self._logger = logger
+        self._page_context_provider = page_context_provider
 
     def _load_supporters(self) -> dict[str, Any]:
         """Load supporters data from JSON file."""
@@ -203,6 +211,7 @@ class ModelPageView:
                 "version": self._get_app_version(),
                 "provider_presets_json": json.dumps(PROVIDER_PRESETS),
                 "provider_models_json": "{}",
+                "rel_prefix": relative_root_prefix(request.path),
             }
 
             if not is_initializing:
@@ -214,6 +223,16 @@ class ModelPageView:
                 except Exception as cache_error:  # pragma: no cover - logging path
                     self._logger.error("Error loading cache data: %s", cache_error)
                     template_context["is_initializing"] = True
+
+            if self._page_context_provider is not None:
+                try:
+                    extra_context = self._page_context_provider(request)
+                    if isinstance(extra_context, dict):
+                        template_context.update(extra_context)
+                except Exception as context_error:  # pragma: no cover - logging path
+                    self._logger.error(
+                        "Error building page context: %s", context_error
+                    )
 
             rendered = self._template_env.get_template(self._template_name).render(
                 **template_context
@@ -663,7 +682,7 @@ class ModelManagementHandler:
                     status=400,
                 )
 
-            metadata_path = os.path.splitext(file_path)[0] + ".metadata.json"
+            metadata_path = get_metadata_path(file_path)
             local_metadata = await self._metadata_sync.load_local_metadata(
                 metadata_path
             )
@@ -1983,6 +2002,11 @@ class ModelDownloadHandler:
                 response_payload["status"] = status
                 if "message" in progress_data:
                     response_payload["message"] = progress_data["message"]
+                # Post-transfer stage (indexing / source metadata); polling
+                # consumers need it to tell "working" from "stuck".
+                for field in ("stage", "platform"):
+                    if field in progress_data:
+                        response_payload[field] = progress_data[field]
             elif status is None and "message" in progress_data:
                 response_payload["message"] = progress_data["message"]
 
@@ -2615,6 +2639,90 @@ class ModelMoveHandler:
         self._move_service = move_service
         self._logger = logger
 
+    async def create_folder(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"success": False, "error": "Invalid JSON body"}, status=400
+            )
+        try:
+            folder_path = data.get("folder_path")
+            if not folder_path:
+                return web.json_response(
+                    {"success": False, "error": "Folder path is required"}, status=400
+                )
+            result = await self._move_service.create_folder(folder_path)
+            status = 200 if result.get("success") else 400
+            return web.json_response(result, status=status)
+        except Exception as exc:
+            self._logger.error("Error creating folder: %s", exc, exc_info=True)
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+    async def delete_folder(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"success": False, "error": "Invalid JSON body"}, status=400
+            )
+        try:
+            folder_path = data.get("folder_path")
+            if not folder_path:
+                return web.json_response(
+                    {"success": False, "error": "Folder path is required"}, status=400
+                )
+            dry_run = bool(data.get("dry_run"))
+            result = await self._move_service.delete_folder(
+                folder_path, dry_run=dry_run
+            )
+            if result.get("success"):
+                if not dry_run:
+                    _broadcast_models_changed()
+                return web.json_response(result, status=200)
+
+            # "not_empty" / "busy" are conflicts between the tree the client
+            # rendered and the on-disk truth; everything else is a bad request.
+            code = result.get("code")
+            status = 409 if code in ("not_empty", "busy") else 400
+            return web.json_response(result, status=status)
+        except Exception as exc:
+            self._logger.error("Error deleting folder: %s", exc, exc_info=True)
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+    async def rename_folder(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"success": False, "error": "Invalid JSON body"}, status=400
+            )
+        try:
+            folder_path = data.get("folder_path")
+            new_name = data.get("new_name")
+            if not folder_path:
+                return web.json_response(
+                    {"success": False, "error": "Folder path is required"}, status=400
+                )
+            if not new_name:
+                return web.json_response(
+                    {"success": False, "error": "New folder name is required"}, status=400
+                )
+            result = await self._move_service.rename_folder(folder_path, new_name)
+            if result.get("success"):
+                if result.get("renamed"):
+                    _broadcast_models_changed()
+                return web.json_response(result, status=200)
+
+            # A name collision or a staged delete inside the subtree is a
+            # conflict with the state the client rendered, not a bad request.
+            code = result.get("code")
+            status = 409 if code in ("target_exists", "busy") else 400
+            return web.json_response(result, status=status)
+        except Exception as exc:
+            self._logger.error("Error renaming folder: %s", exc, exc_info=True)
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
     async def move_model(self, request: web.Request) -> web.Response:
         try:
             data = await request.json()
@@ -2736,6 +2844,71 @@ class ModelAutoOrganizeHandler:
             self._logger.error(
                 "Error getting auto-organize progress: %s", exc, exc_info=True
             )
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+
+class ModelFilenameTemplateHandler:
+    """Apply the configured filename template to existing library models."""
+
+    def __init__(
+        self,
+        *,
+        use_case: FilenameTemplateUseCase,
+        progress_callback: WebSocketFilenameTemplateProgressCallback,
+        logger: logging.Logger,
+    ) -> None:
+        self._use_case = use_case
+        self._progress_callback = progress_callback
+        self._logger = logger
+
+    async def apply_filename_template(self, request: web.Request) -> web.Response:
+        try:
+            file_paths = None
+            if request.method == "POST":
+                try:
+                    data = await request.json()
+                    file_paths = data.get("file_paths")
+                except Exception:  # pragma: no cover - permissive path
+                    pass
+            else:
+                # GET variant (browser extension is GET-only): comma-separated
+                # file_paths query parameter.
+                raw_file_paths = request.query.get("file_paths")
+                if raw_file_paths:
+                    file_paths = [
+                        path.strip()
+                        for path in raw_file_paths.split(",")
+                        if path.strip()
+                    ]
+
+            result = await self._use_case.execute(
+                file_paths=file_paths,
+                progress_callback=self._progress_callback,
+            )
+            _broadcast_models_changed()
+            return web.json_response(result.to_dict())
+        except AutoOrganizeInProgressError:
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "Another library operation is already running. Please wait for it to complete.",
+                },
+                status=409,
+            )
+        except Exception as exc:
+            self._logger.error(
+                "Error in apply_filename_template: %s", exc, exc_info=True
+            )
+            try:
+                await self._progress_callback.on_progress(
+                    {
+                        "type": "filename_template_progress",
+                        "status": "error",
+                        "error": str(exc),
+                    }
+                )
+            except Exception:  # pragma: no cover - defensive reporting
+                pass
             return web.json_response({"success": False, "error": str(exc)}, status=500)
 
 
@@ -3506,6 +3679,7 @@ class ModelHandlerSet:
     civitai: ModelCivitaiHandler
     move: ModelMoveHandler
     auto_organize: ModelAutoOrganizeHandler
+    filename_template: ModelFilenameTemplateHandler
     updates: ModelUpdateHandler
 
     def to_route_mapping(
@@ -3567,8 +3741,12 @@ class ModelHandlerSet:
             "get_civitai_model_by_hash": self.civitai.get_civitai_model_by_hash,
             "move_model": self.move.move_model,
             "move_models_bulk": self.move.move_models_bulk,
+            "create_folder": self.move.create_folder,
+            "delete_folder": self.move.delete_folder,
+            "rename_folder": self.move.rename_folder,
             "auto_organize_models": self.auto_organize.auto_organize_models,
             "get_auto_organize_progress": self.auto_organize.get_auto_organize_progress,
+            "apply_filename_template": self.filename_template.apply_filename_template,
             "get_model_notes": self.query.get_model_notes,
             "get_model_favorite": self.query.get_model_favorite,
             "get_model_preview_url": self.query.get_model_preview_url,

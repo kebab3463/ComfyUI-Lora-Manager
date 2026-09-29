@@ -25,9 +25,11 @@ from ..services.use_cases import (
     BulkMetadataRefreshUseCase,
     DownloadModelUseCase,
     RefreshModelStatsUseCase,
+    FilenameTemplateUseCase,
 )
 from ..services.websocket_progress_callback import (
     WebSocketBroadcastCallback,
+    WebSocketFilenameTemplateProgressCallback,
     WebSocketProgressCallback,
 )
 from ..utils.exif_utils import ExifUtils
@@ -38,6 +40,7 @@ from .handlers.model_handlers import (
     ModelAutoOrganizeHandler,
     ModelCivitaiHandler,
     ModelDownloadHandler,
+    ModelFilenameTemplateHandler,
     ModelHandlerSet,
     ModelListingHandler,
     ModelManagementHandler,
@@ -84,6 +87,9 @@ class BaseModelRoutes(ABC):
         self.model_lifecycle_service: ModelLifecycleService | None = None
         self.websocket_progress_callback = WebSocketProgressCallback()
         self.metadata_progress_callback = WebSocketBroadcastCallback()
+        self.filename_template_progress_callback = (
+            WebSocketFilenameTemplateProgressCallback()
+        )
 
         self._handler_set: ModelHandlerSet | None = None
         self._handler_mapping: Dict[str, Callable[[web.Request], Awaitable[web.Response]]] | None = None
@@ -150,6 +156,7 @@ class BaseModelRoutes(ABC):
             settings_service=self._settings,
             server_i18n=self._server_i18n,
             logger=logger,
+            page_context_provider=self._get_page_context_provider(),
         )
         listing = ModelListingHandler(
             service=service,
@@ -209,6 +216,17 @@ class BaseModelRoutes(ABC):
             ws_manager=self._ws_manager,
             logger=logger,
         )
+        filename_template_use_case = FilenameTemplateUseCase(
+            scanner=service.scanner,
+            lifecycle_service=self._ensure_lifecycle_service(),
+            lock_provider=self._ws_manager,
+            model_type=service.model_type,
+        )
+        filename_template = ModelFilenameTemplateHandler(
+            use_case=filename_template_use_case,
+            progress_callback=self.filename_template_progress_callback,
+            logger=logger,
+        )
         updates = ModelUpdateHandler(
             service=service,
             update_service=update_service,
@@ -225,6 +243,7 @@ class BaseModelRoutes(ABC):
             civitai=civitai,
             move=move,
             auto_organize=auto_organize,
+            filename_template=filename_template,
             updates=updates,
         )
 
@@ -257,6 +276,10 @@ class BaseModelRoutes(ABC):
     def _get_expected_model_types(self) -> str:
         """Get expected model types string for error messages - to be overridden by subclasses."""
         return "any model type"
+
+    def _get_page_context_provider(self):
+        """Optional hook returning extra template context for the page view."""
+        return None
 
     def _find_model_file(self, files):
         """Find the appropriate model file from the files list - can be overridden by subclasses."""

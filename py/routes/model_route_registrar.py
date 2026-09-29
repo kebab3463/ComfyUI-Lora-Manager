@@ -44,10 +44,19 @@ COMMON_ROUTE_DEFINITIONS: tuple[RouteDefinition, ...] = (
     RouteDefinition("POST", "/api/lm/{prefix}/verify-duplicates", "verify_duplicates"),
     RouteDefinition("POST", "/api/lm/{prefix}/move_model", "move_model"),
     RouteDefinition("POST", "/api/lm/{prefix}/move_models_bulk", "move_models_bulk"),
+    RouteDefinition("POST", "/api/lm/{prefix}/create-folder", "create_folder"),
+    RouteDefinition("POST", "/api/lm/{prefix}/delete-folder", "delete_folder"),
+    RouteDefinition("POST", "/api/lm/{prefix}/rename-folder", "rename_folder"),
     RouteDefinition("GET", "/api/lm/{prefix}/auto-organize", "auto_organize_models"),
     RouteDefinition("POST", "/api/lm/{prefix}/auto-organize", "auto_organize_models"),
     RouteDefinition(
         "GET", "/api/lm/{prefix}/auto-organize-progress", "get_auto_organize_progress"
+    ),
+    RouteDefinition(
+        "GET", "/api/lm/{prefix}/apply-filename-template", "apply_filename_template"
+    ),
+    RouteDefinition(
+        "POST", "/api/lm/{prefix}/apply-filename-template", "apply_filename_template"
     ),
     RouteDefinition("GET", "/api/lm/{prefix}/top-tags", "get_top_tags"),
     RouteDefinition("GET", "/api/lm/{prefix}/search-tags", "search_tags"),

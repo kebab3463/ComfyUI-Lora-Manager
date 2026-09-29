@@ -12,10 +12,34 @@ from ..services.settings_manager import SettingsManager
 from ..utils.civitai_utils import resolve_license_payload
 from ..utils.model_utils import determine_base_model
 from ..utils.models import autov3_from_civitai_files
+from ..utils.sidecar_paths import get_metadata_path
 from .connectivity_guard import OFFLINE_FRIENDLY_MESSAGE, is_expected_offline_error
 from .errors import RateLimitError
+from .model_sources import has_external_source
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_ordered_unique(existing: Iterable[str], new: Iterable[str]) -> list[str]:
+    """Concatenate two word lists, dropping duplicates without reordering.
+
+    Trigger word order is meaningful: the sequence stored in
+    ``civitai.trainedWords`` is the order used when building prompts, and users
+    can reorder it in the UI. A plain ``set`` union used to shuffle that order on
+    every metadata refresh, so existing words are kept first (in their saved
+    order) and newly discovered ones are appended.
+    """
+
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    for word in list(existing) + list(new):
+        if word in seen:
+            continue
+        seen.add(word)
+        merged.append(word)
+
+    return merged
 
 
 class MetadataProviderProtocol(Protocol):
@@ -114,9 +138,10 @@ class MetadataSyncService:
                 )
 
             if "trainedWords" in existing_civitai:
-                existing_trained = existing_civitai.get("trainedWords", [])
-                new_trained = civitai_metadata.get("trainedWords", [])
-                merged_trained = list(set(existing_trained + new_trained))
+                existing_trained = existing_civitai.get("trainedWords", []) or []
+                new_trained = civitai_metadata.get("trainedWords", []) or []
+                # Order preserving merge: the saved order drives prompt order.
+                merged_trained = _merge_ordered_unique(existing_trained, new_trained)
                 merged_civitai["trainedWords"] = merged_trained
 
             local_metadata["civitai"] = merged_civitai
@@ -192,7 +217,7 @@ class MetadataSyncService:
             logger.error(error)
             return False, error
 
-        metadata_path = os.path.splitext(file_path)[0] + ".metadata.json"
+        metadata_path = get_metadata_path(file_path)
         enable_archive = self._settings.get("enable_metadata_archive_db", False)
         previous_source = model_data.get("metadata_source") or (model_data.get("civitai") or {}).get("source")
 
@@ -222,9 +247,10 @@ class MetadataSyncService:
                         error_msg = "CivitAI model is deleted and no archive provider is available"
                     return False, error_msg
             else:
-                is_hf_source = bool(model_data.get("hf_url"))
+                is_hf_source = has_external_source(model_data)
                 if is_hf_source:
-                    # HF-sourced model: only check CivitAI API directly.
+                    # External-source model (Hugging Face / ModelScope /
+                    # TensorArt): only check CivitAI API directly.
                     # CivArchive is almost guaranteed to have no record, and
                     # hitting it wastes rate-limit budget.
                     # Use a distinct provider name ("civitai_api" not None) so
@@ -460,7 +486,7 @@ class MetadataSyncService:
                 + (f" with version: {model_version_id}" if model_version_id else "")
             )
 
-        metadata_path = os.path.splitext(file_path)[0] + ".metadata.json"
+        metadata_path = get_metadata_path(file_path)
         await self.update_model_metadata(
             metadata_path,
             metadata,
@@ -480,7 +506,7 @@ class MetadataSyncService:
     ) -> Dict[str, Any]:
         """Apply metadata updates and persist to disk and cache."""
 
-        metadata_path = os.path.splitext(file_path)[0] + ".metadata.json"
+        metadata_path = get_metadata_path(file_path)
         metadata = await metadata_loader(metadata_path)
 
         for key, value in updates.items():
@@ -529,7 +555,7 @@ class MetadataSyncService:
         }
 
         expected_hash: Optional[str] = None
-        first_metadata_path = os.path.splitext(file_paths[0])[0] + ".metadata.json"
+        first_metadata_path = get_metadata_path(file_paths[0])
         first_metadata = await metadata_loader(first_metadata_path)
         if first_metadata and "sha256" in first_metadata:
             expected_hash = first_metadata["sha256"].lower()
@@ -540,7 +566,7 @@ class MetadataSyncService:
 
             try:
                 actual_hash = await hash_calculator(path)
-                metadata_path = os.path.splitext(path)[0] + ".metadata.json"
+                metadata_path = get_metadata_path(path)
                 metadata = await metadata_loader(metadata_path)
                 stored_hash = metadata.get("sha256", "").lower()
 

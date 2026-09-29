@@ -8,6 +8,7 @@ import {
     isValidModelType,
     DOWNLOAD_ENDPOINTS,
     HF_ENDPOINTS,
+    MODEL_SOURCE_ENDPOINTS,
     WS_ENDPOINTS
 } from './apiConfig.js';
 import { resetAndReload } from './modelApiFactory.js';
@@ -1453,9 +1454,13 @@ export class BaseModelApiClient {
         }
     }
 
-    async fetchModelFolders() {
+    async fetchModelFolders(options = {}) {
         try {
-            const response = await fetch(this.apiConfig.endpoints.folders);
+            const { includeEmpty = false } = options || {};
+            const url = includeEmpty
+                ? `${this.apiConfig.endpoints.folders}?include_empty=1`
+                : this.apiConfig.endpoints.folders;
+            const response = await fetch(url);
             if (!response.ok) {
                 throw new Error(`Failed to fetch ${this.apiConfig.config.displayName} folders`);
             }
@@ -1464,6 +1469,89 @@ export class BaseModelApiClient {
             console.error('Error fetching model folders:', error);
             throw error;
         }
+    }
+
+    async createFolder(folderPath) {
+        const response = await fetch(this.apiConfig.endpoints.createFolder, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ folder_path: folderPath })
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok || result.success === false) {
+            throw new Error(result.error || `Failed to create folder`);
+        }
+
+        return result;
+    }
+
+    /**
+     * Delete a model-free folder inside the library roots.
+     *
+     * Only model-free folders can be removed; the backend answers with a 409
+     * `not_empty`/`busy` conflict otherwise. Those codes are attached to the
+     * thrown Error (`code`, `manifest`) so callers can explain the refusal
+     * instead of showing a bare message.
+     *
+     * @param {string} folderPath Absolute business path of the folder
+     * @param {{dryRun?: boolean}} [options]
+     */
+    async deleteFolder(folderPath, options = {}) {
+        const { dryRun = false } = options || {};
+
+        const response = await fetch(this.apiConfig.endpoints.deleteFolder, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ folder_path: folderPath, dry_run: dryRun })
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok || result.success === false) {
+            const error = new Error(result.error || `Failed to delete folder`);
+            error.code = result.code || null;
+            error.manifest = result.manifest || null;
+            throw error;
+        }
+
+        return result;
+    }
+
+    /**
+     * Rename a folder inside the library roots.
+     *
+     * Works on folders that hold models too — the backend re-keys the affected
+     * cache records instead of cascading. A name collision or a staged delete
+     * inside the subtree surfaces as a 409 conflict, attached to the thrown
+     * Error as `code`.
+     *
+     * @param {string} folderPath Absolute business path of the folder
+     * @param {string} newName New leaf name (a single path segment)
+     */
+    async renameFolder(folderPath, newName) {
+        const response = await fetch(this.apiConfig.endpoints.renameFolder, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ folder_path: folderPath, new_name: newName })
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok || result.success === false) {
+            const error = new Error(result.error || `Failed to rename folder`);
+            error.code = result.code || null;
+            throw error;
+        }
+
+        return result;
     }
 
     async fetchUnifiedFolderTree(options = {}) {
@@ -1526,30 +1614,52 @@ export class BaseModelApiClient {
         }
     }
 
-    async fetchHfRepoFiles(repo, revision = 'main') {
+    /**
+     * List the downloadable weight files of an external repository.
+     * @param {string} repo - `owner/name`
+     * @param {string} [platform] - `huggingface` (default) or `modelscope`
+     * @param {string} [revision] - branch; each site has its own default
+     */
+    async fetchModelSourceFiles(repo, platform = 'huggingface', revision = '') {
         try {
-            const params = new URLSearchParams({ repo, revision });
-            const response = await fetch(`${HF_ENDPOINTS.repoFiles}?${params}`);
+            const params = new URLSearchParams({ repo, platform });
+            if (revision) params.set('revision', revision);
+            const response = await fetch(`${MODEL_SOURCE_ENDPOINTS.repoFiles}?${params}`);
             if (!response.ok) {
                 const err = await response.json().catch(() => ({}));
-                throw new Error(err.error || 'Failed to fetch HF repo files');
+                throw new Error(err.error || 'Failed to fetch repository files');
             }
             return await response.json();
         } catch (error) {
-            console.error('Error fetching HF repo files:', error);
+            console.error('Error fetching repository files:', error);
             throw error;
         }
     }
 
-    async downloadHfModel({ repo, filename, revision, modelRoot, relativePath, useDefaultPaths, download_id }) {
+    /** Backwards-compatible Hugging Face wrapper. */
+    async fetchHfRepoFiles(repo, revision = 'main') {
+        return this.fetchModelSourceFiles(repo, 'huggingface', revision);
+    }
+
+    async downloadModelSource({
+        platform = 'huggingface',
+        repo,
+        filename,
+        revision,
+        modelRoot,
+        relativePath,
+        useDefaultPaths,
+        download_id,
+    }) {
         try {
-            const response = await fetch(HF_ENDPOINTS.download, {
+            const response = await fetch(MODEL_SOURCE_ENDPOINTS.download, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    platform,
                     repo,
                     filename,
-                    revision: revision || 'main',
+                    revision: revision || '',
                     model_root: modelRoot,
                     relative_path: relativePath || '',
                     use_default_paths: useDefaultPaths || false,
@@ -1563,9 +1673,23 @@ export class BaseModelApiClient {
 
             return await response.json();
         } catch (error) {
-            console.error('Error downloading HF model:', error);
+            console.error('Error downloading model:', error);
             throw error;
         }
+    }
+
+    /** Backwards-compatible Hugging Face wrapper. */
+    async downloadHfModel({ repo, filename, revision, modelRoot, relativePath, useDefaultPaths, download_id }) {
+        return this.downloadModelSource({
+            platform: 'huggingface',
+            repo,
+            filename,
+            revision: revision || 'main',
+            modelRoot,
+            relativePath,
+            useDefaultPaths,
+            download_id,
+        });
     }
 
     _buildQueryParams(baseParams, pageState) {
@@ -2207,6 +2331,135 @@ export class BaseModelApiClient {
         }, {
             initialMessage: translate('loras.bulkOperations.autoOrganizeProgress.initializing', {}, 'Initializing auto-organize...'),
             completionMessage: translate('loras.bulkOperations.autoOrganizeProgress.complete', {}, 'Auto-organize complete')
+        });
+    }
+
+    /**
+     * Apply the configured download filename template to models, renaming their files
+     * @param {Array} filePaths - Optional array of file paths to rename. If not provided, applies to all models.
+     * @returns {Promise} - Promise that resolves when the operation is complete
+     */
+    async applyFilenameTemplate(filePaths = null) {
+        let ws = null;
+
+        await state.loadingManager.showWithProgress(async (loading) => {
+            loading.showCancelButton(() => this.cancelTask());
+            try {
+                // Connect to WebSocket for progress updates
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+                ws = new WebSocket(`${wsProtocol}${window.location.host}${WS_ENDPOINTS.fetchProgress}`);
+
+                const operationComplete = new Promise((resolve, reject) => {
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+
+                        if (data.type !== 'filename_template_progress') return;
+
+                        switch (data.status) {
+                            case 'started':
+                                loading.setProgress(0);
+                                const operationType = data.operation_type === 'bulk' ? 'selected models' : 'all models';
+                                loading.setStatus(translate('loras.bulkOperations.filenameTemplateProgress.starting', { type: operationType }, `Applying filename template to ${operationType}...`));
+                                break;
+
+                            case 'processing':
+                                const percent = data.total > 0 ? ((data.processed / data.total) * 90).toFixed(1) : 0;
+                                loading.setProgress(percent);
+                                loading.setStatus(
+                                    translate('loras.bulkOperations.filenameTemplateProgress.processing', {
+                                        processed: data.processed,
+                                        total: data.total,
+                                        success: data.success,
+                                        failures: data.failures,
+                                        skipped: data.skipped
+                                    }, `Processing (${data.processed}/${data.total}) - ${data.success} renamed, ${data.skipped} skipped, ${data.failures} failed`)
+                                );
+                                break;
+
+                            case 'completed':
+                                loading.setProgress(100);
+                                loading.setStatus(
+                                    translate('loras.bulkOperations.filenameTemplateProgress.completed', {
+                                        success: data.success,
+                                        skipped: data.skipped,
+                                        failures: data.failures,
+                                        total: data.total
+                                    }, `Completed: ${data.success} renamed, ${data.skipped} skipped, ${data.failures} failed`)
+                                );
+
+                                setTimeout(() => {
+                                    resolve(data);
+                                }, 1500);
+                                break;
+
+                            case 'cancelled':
+                                loading.setStatus(translate('toast.api.operationCancelled', {}, 'Operation cancelled by user'));
+                                resolve(data);
+                                break;
+
+                            case 'error':
+                                loading.setStatus(translate('loras.bulkOperations.filenameTemplateProgress.error', { error: data.error }, `Error: ${data.error}`));
+                                reject(new Error(data.error));
+                                break;
+                        }
+                    };
+
+                    ws.onerror = (error) => {
+                        console.error('WebSocket error during filename template apply:', error);
+                        reject(new Error('Connection error'));
+                    };
+                });
+
+                // Start the filename template operation
+                const endpoint = this.apiConfig.endpoints.applyFilenameTemplate;
+
+                const requestBody = {};
+                if (filePaths) {
+                    requestBody.file_paths = filePaths;
+                }
+
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody),
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.error || 'Failed to start filename template operation');
+                }
+
+                // Wait for the operation to complete via WebSocket
+                const result = await operationComplete;
+
+                // Show appropriate success message based on results
+                if (result.status === 'cancelled') {
+                    showToast('toast.api.operationCancelledPartial', { success: result.success, total: result.total }, 'info');
+                } else if (result.failures === 0) {
+                    showToast('toast.loras.filenameTemplateSuccess', {
+                        count: result.success,
+                        type: result.operation_type === 'bulk' ? 'selected models' : 'all models'
+                    }, 'success');
+                } else {
+                    showToast('toast.loras.filenameTemplatePartialSuccess', {
+                        success: result.success,
+                        failures: result.failures,
+                        total: result.total
+                    }, 'warning');
+                }
+
+            } catch (error) {
+                console.error('Error applying filename template:', error);
+                showToast('toast.loras.filenameTemplateFailed', { error: error.message }, 'error');
+                throw error;
+            } finally {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.close();
+                }
+            }
+        }, {
+            initialMessage: translate('loras.bulkOperations.filenameTemplateProgress.initializing', {}, 'Initializing filename template apply...'),
+            completionMessage: translate('loras.bulkOperations.filenameTemplateProgress.complete', {}, 'Filename template apply complete')
         });
     }
 

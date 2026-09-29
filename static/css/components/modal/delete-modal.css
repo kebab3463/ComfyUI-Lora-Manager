@@ -27,6 +27,12 @@
     justify-content: center;
 }
 
+/* Self-managed by SettingsManager: stacks above the settings modal like the
+   directory picker (settings panels sit at 10000/10002). */
+#filenameTemplateConfirmModal {
+    z-index: 10010;
+}
+
 .delete-modal-content {
     max-width: 500px;
     width: 90%;
@@ -34,6 +40,18 @@
     margin: 0 auto;
     position: relative;
     animation: modalFadeIn 0.2s ease-out;
+}
+
+/* The folder delete confirm button is held disabled while the folder contents
+   are checked against the backend, so it must not look clickable. */
+#deleteFolderModal .delete-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+#deleteFolderModal .delete-btn:disabled:hover {
+    background: var(--lora-error);
 }
 
 #resolveFilenameConflictsModal .confirmation-message {

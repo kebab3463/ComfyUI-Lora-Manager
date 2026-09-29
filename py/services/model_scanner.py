@@ -11,10 +11,18 @@ from ..utils.models import BaseModelMetadata, autov3_from_civitai_files
 from ..config import config
 from ..utils.file_utils import find_preview_file, get_preview_extension, calculate_sha256, calculate_autov3
 from ..utils.metadata_manager import MetadataManager
+from ..utils.sidecar_paths import (
+    get_metadata_path,
+    get_preview_dir,
+    get_sidecar_dir,
+    is_centralized,
+    resolve_centralized_dir_for_dir,
+)
 from ..utils.civitai_utils import resolve_license_info
 from .model_cache import ModelCache, get_civitai_stat
 from .model_hash_index import ModelHashIndex
 from .model_lifecycle_service import delete_model_artifacts, _require_path_in_library_roots
+from .model_sources import normalize_metadata_source
 from .service_registry import ServiceRegistry
 from .websocket_manager import ws_manager
 from .persistent_model_cache import get_persistent_cache
@@ -62,9 +70,14 @@ def _is_hidden_relative_path(rel_path: str) -> bool:
     return any(part.startswith(".") for part in rel_path.replace(os.sep, "/").split("/"))
 
 
-# TTL (seconds) for the get_all_folders() live-walk cache, so rapid repeated
-# requests (modal open + autocomplete) do not re-walk the model roots.
-ALL_FOLDERS_CACHE_TTL_SECONDS = 5.0
+def _file_name_stem(file_path: str) -> str:
+    """Return the extension-free file name of a normalized model path.
+
+    ``file_name`` cache/sidecar fields are defined as the on-disk stem, so this
+    is the authoritative value to compare stored names against (issue #1112).
+    """
+    return os.path.splitext(os.path.basename(file_path))[0]
+
 
 # Maps a scanner model type to the manager page type used in progress
 # broadcasts (e.g. 'lora' -> 'loras').
@@ -72,6 +85,7 @@ PAGE_TYPE_MAP = {
     'lora': 'loras',
     'checkpoint': 'checkpoints',
     'embedding': 'embeddings',
+    'other': 'other',
 }
 
 
@@ -89,6 +103,10 @@ class CacheBuildResult:
     hash_index: ModelHashIndex
     tags_count: Dict[str, int]
     excluded_models: List[str]
+    # Every directory under the model roots (including empty ones) discovered
+    # during the scan, or None when the source has no folder information
+    # (e.g. a persisted snapshot predating folder recording).
+    all_folders: Optional[List[str]] = None
 
 class ModelScanner:
     """Base service for scanning and managing model files"""
@@ -144,8 +162,9 @@ class ModelScanner:
         self._name_display_mode = self._resolve_name_display_mode()
         self._cancel_requested = False  # Flag for cancellation
         self._autov3_backfill_scheduled = False  # One-time AutoV3 backfill trigger per process
-        # Short-lived cache for get_all_folders(): (timestamp, folders) or None
-        self._all_folders_ttl_cache: Optional[Tuple[float, List[str]]] = None
+        # Guard against concurrent all-folders backfill walks (cold fallback
+        # for persisted snapshots that predate folder recording).
+        self._all_folders_backfill_running = False
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -208,8 +227,14 @@ class ModelScanner:
         """
         self._cache_version += 1
 
-    def on_library_changed(self) -> None:
-        """Reset caches when the active library changes."""
+    def on_library_changed(self, reconcile: bool = False) -> None:
+        """Reset caches when the active library changes.
+
+        When ``reconcile`` is True an incremental reconcile runs right after
+        the cache is re-hydrated, so newly configured roots are scanned and
+        entries for removed roots are purged. Used when scanner-affecting
+        settings (e.g. the Other Models toggles) change.
+        """
         self._persistent_cache = get_persistent_cache()
         self._cache = None
         self._hash_index = ModelHashIndex()
@@ -217,7 +242,6 @@ class ModelScanner:
         self._excluded_models = []
         self._is_initializing = False
         self._name_display_mode = self._resolve_name_display_mode()
-        self.invalidate_all_folders_cache()
         self.bump_cache_version()
 
         try:
@@ -228,7 +252,7 @@ class ModelScanner:
         if loop and not loop.is_closed():
             self._loop = loop
             self.loop = loop
-            loop.create_task(self.initialize_in_background())
+            loop.create_task(self.initialize_in_background(reconcile=reconcile))
 
     def _resolve_name_display_mode(self) -> str:
         """Return the configured display mode for name sorting."""
@@ -407,8 +431,18 @@ class ModelScanner:
             'civitai': civitai_slim,
             'civitai_deleted': bool(get_value('civitai_deleted', False)),
             'skip_metadata_refresh': bool(get_value('skip_metadata_refresh', False)),
+            # External model source (Hugging Face / ModelScope / TensorArt).
+            # `source_url` + `source_platform` are canonical; `hf_url` stays in
+            # sync as a legacy alias (normalised below).  `source_model_id` /
+            # `source_version_id` are the site-native identity ids version
+            # grouping keys off (ModelScope; empty elsewhere).
+            'source_platform': get_value('source_platform', '') or '',
+            'source_url': get_value('source_url', '') or '',
             'hf_url': get_value('hf_url', '') or '',
+            'source_model_id': get_value('source_model_id', '') or '',
+            'source_version_id': get_value('source_version_id', '') or '',
         }
+        normalize_metadata_source(entry)
 
         license_source: Dict[str, Any] = {}
         if isinstance(civitai_full, Mapping):
@@ -486,8 +520,14 @@ class ModelScanner:
         _, license_flags = resolve_license_info(license_source)
         entry['license_flags'] = license_flags
 
-    async def initialize_in_background(self) -> None:
-        """Initialize cache in background using thread pool"""
+    async def initialize_in_background(self, reconcile: bool = False) -> None:
+        """Initialize cache in background using thread pool
+
+        Args:
+            reconcile: When True and a persisted snapshot is hydrated, run an
+                incremental reconcile afterwards so the cache matches the
+                current root configuration.
+        """
         try:
             # Set initial empty cache to avoid None reference errors
             if self._cache is None:
@@ -527,6 +567,11 @@ class ModelScanner:
                 logger.info(
                     f"{self.model_type.capitalize()} cache hydrated from persisted snapshot with {len(self._cache.raw_data)} models"
                 )
+                if reconcile:
+                    # Root configuration changed (e.g. Other Models toggles):
+                    # pick up newly enabled folders and drop rows for folders
+                    # that are no longer managed.
+                    await self.get_cached_data(force_refresh=True)
                 return
 
             # Persistent load failed; fall back to a full scan
@@ -689,21 +734,33 @@ class ModelScanner:
         if not persisted or not persisted.raw_data:
             return None
 
+        # Drop entries the scanner no longer manages (e.g. an other-model
+        # sub_type the user just disabled) before rebuilding the indexes, so
+        # hash/autov3 lookups cannot resolve to unmanaged files either.
+        kept_items = [
+            item
+            for item in persisted.raw_data
+            if self._should_keep_cached_entry(item)
+        ]
+        kept_paths = {
+            item.get("file_path") for item in kept_items if item.get("file_path")
+        }
+
         hash_index = ModelHashIndex()
         for sha_value, path in persisted.hash_rows:
-            if sha_value and path:
+            if sha_value and path and path in kept_paths:
                 hash_index.add_entry(sha_value.lower(), path)
 
         # Rebuild the AutoV3 index from the persisted autov3_index rows. These
         # cover every known autov3 -> path mapping regardless of whether a
         # sha256 row also exists for the same file.
         for autov3_value, path in persisted.autov3_hash_rows:
-            if autov3_value and path:
+            if autov3_value and path and path in kept_paths:
                 hash_index.add_autov3(autov3_value.lower(), path)
 
         tags_count: Dict[str, int] = {}
         adjusted_raw_data: List[Dict[str, Any]] = []
-        for item in persisted.raw_data:
+        for item in kept_items:
             # load_cache builds a fresh dict per row, and validate_batch below
             # works on its own per-entry copy when auto_repair=True, so no
             # additional dict copy is needed here.
@@ -729,7 +786,8 @@ class ModelScanner:
             raw_data=valid_entries,
             hash_index=hash_index,
             tags_count=tags_count,
-            excluded_models=list(persisted.excluded_models)
+            excluded_models=list(persisted.excluded_models),
+            all_folders=list(persisted.all_folders) if persisted.all_folders is not None else None,
         )
         return scan_result, invalid_entries
 
@@ -764,6 +822,7 @@ class ModelScanner:
                 hash_snapshot,
                 list(scan_result.excluded_models),
                 autov3_snapshot,
+                scan_result.all_folders,
             )
         except Exception as exc:
             logger.warning("%s Scanner: Failed to persist cache: %s", self.model_type.capitalize(), exc)
@@ -811,7 +870,12 @@ class ModelScanner:
             raw_data=list(self._cache.raw_data),
             hash_index=self._hash_index,
             tags_count=dict(self._tags_count),
-            excluded_models=list(self._excluded_models)
+            excluded_models=list(self._excluded_models),
+            all_folders=(
+                list(self._cache.all_folders)
+                if self._cache.all_folders is not None
+                else None
+            ),
         )
         await self._save_persistent_cache(snapshot)
         await self._sync_download_history(snapshot.raw_data, source='scan')
@@ -1032,20 +1096,56 @@ class ModelScanner:
             await self._broadcast_scan_progress('started', 'reconcile_scan', 0, False)
             
             # Get current cached file paths
+            cached_size_before = len(self._cache.raw_data)
             cached_paths = {item['file_path'] for item in self._cache.raw_data}
             path_to_item = {item['file_path']: item for item in self._cache.raw_data}
-            cached_real_paths = {}
-            for cached_path in cached_paths:
-                try:
-                    cached_real_paths.setdefault(os.path.realpath(cached_path), cached_path)
-                except Exception:
-                    continue
+
+            # physical path -> cached business path, for the alias case where the
+            # same file is reachable under a different path than the cached one
+            # (overlapping roots / symlink layout changes): keep the existing
+            # entry instead of delete + re-add (which would re-read metadata and
+            # re-hash every file). Built lazily on the first miss, because a
+            # realpath per cached entry is ~half the cost of a no-change
+            # reconcile and the map is only ever consulted for misses.
+            cached_real_paths: Optional[Dict[str, str]] = None
+
+            def lookup_cached_real_path(real_path: str) -> Optional[str]:
+                nonlocal cached_real_paths
+                if cached_real_paths is None:
+                    cached_real_paths = {}
+                    for cached_path in cached_paths:
+                        try:
+                            cached_real_paths.setdefault(os.path.realpath(cached_path), cached_path)
+                        except Exception:
+                            continue
+                return cached_real_paths.get(real_path)
             
             # Track found files and new files
             found_paths = set()
             new_files = []
+            # Cached entries whose stored file_name no longer matches the file
+            # on disk (e.g. dotted stems truncated by the legacy .civitai.info
+            # migration, issue #1112). Repaired in place after the walk; the
+            # list stays empty on a clean library, so a no-change reconcile
+            # only pays one string compare per cached file.
+            stale_paths: List[str] = []
+            stale_seen: Set[str] = set()
+
+            def mark_stale_if_needed(cached_path: str) -> None:
+                """Queue a cached path for file_name repair when it drifted."""
+                if cached_path in stale_seen:
+                    return
+                item = path_to_item.get(cached_path)
+                if item is None:
+                    return
+                if item.get("file_name") == _file_name_stem(cached_path):
+                    return
+                stale_seen.add(cached_path)
+                stale_paths.append(cached_path)
+
             visited_real_paths = set()
             discovered_real_files = set()
+            discovered_folders: Set[str] = set()
 
             # Scan all model roots
             for root_path in self.get_model_roots():
@@ -1060,21 +1160,35 @@ class ModelScanner:
                         continue
                     visited_real_paths.add(real_root)
 
+                    # Record every visited directory (including empty ones) so
+                    # the folder tree stays accurate without a live walk.
+                    rel_dir = os.path.relpath(
+                        os.path.abspath(root), os.path.abspath(root_path)
+                    ).replace(os.path.sep, "/")
+                    if rel_dir != "." and not _is_hidden_relative_path(rel_dir):
+                        discovered_folders.add(rel_dir)
+
                     for file in files:
                         ext = os.path.splitext(file)[1].lower()
                         if ext in self.file_extensions:
                             # Construct paths exactly as they would be in cache
                             file_path = os.path.join(root, file).replace(os.sep, '/')
-                            real_file_path = os.path.realpath(os.path.join(root, file))
-                            
+
                             # Check if this file is already in cache
                             if file_path in cached_paths:
                                 found_paths.add(file_path)
+                                mark_stale_if_needed(file_path)
                                 continue
 
-                            cached_real_match = cached_real_paths.get(real_file_path)
+                            # Only a cache miss needs the physical path, so the
+                            # realpath syscalls are paid per changed file rather
+                            # than per file in the library.
+                            real_file_path = os.path.realpath(os.path.join(root, file))
+
+                            cached_real_match = lookup_cached_real_path(real_file_path)
                             if cached_real_match:
                                 found_paths.add(cached_real_match)
+                                mark_stale_if_needed(cached_real_match)
                                 continue
 
                             if file_path in self._excluded_models:
@@ -1087,6 +1201,7 @@ class ModelScanner:
                                 for cached_path in cached_paths:
                                     if cached_path.lower() == lower_path:
                                         found_paths.add(cached_path)
+                                        mark_stale_if_needed(cached_path)
                                         matched = True
                                         break
                                 if matched:
@@ -1117,6 +1232,9 @@ class ModelScanner:
                 total_new = len(new_files)
                 processed_new = 0
                 last_progress_time = time.time()
+                # Snapshot the roots once: this matches the walk above (which
+                # also snapshots them) and avoids a config read per new file.
+                model_roots = self.get_model_roots()
                 for i in range(0, total_new, batch_size):
                     batch = new_files[i:i+batch_size]
                     for path in batch:
@@ -1125,12 +1243,10 @@ class ModelScanner:
                         try:
                             # Find the appropriate root path for this file
                             root_path = None
-                            model_roots = self.get_model_roots()
+                            normalized_path = os.path.normpath(path)
                             for potential_root in model_roots:
                                 # Normalize both paths for comparison
-                                normalized_path = os.path.normpath(path)
-                                normalized_root = os.path.normpath(potential_root)
-                                if normalized_path.startswith(normalized_root):
+                                if normalized_path.startswith(os.path.normpath(potential_root)):
                                     root_path = potential_root
                                     break
                             
@@ -1196,7 +1312,57 @@ class ModelScanner:
                                 elapsed_seconds=time.time() - start_time,
                             )
                             return
-            
+
+            # Repair rows whose file_name drifted from the file on disk. Only
+            # mismatching entries are re-read here, so a clean library never
+            # touches metadata during a refresh. Each repair goes through the
+            # single-row update path: load_metadata() normalizes the sidecar
+            # (MetadataManager._normalize_metadata_paths) and
+            # _sync_cache_from_metadata_impl() rewrites one targeted SQL delta
+            # instead of a full cache save, and the mismatch is gone
+            # afterwards, so the work never repeats (issue #1112).
+            total_repaired = 0
+            if stale_paths:
+                logger.info(
+                    "%s Scanner: Repairing %d cached entries whose file_name no longer matches the file on disk",
+                    self.model_type.capitalize(),
+                    len(stale_paths),
+                )
+                for path in stale_paths:
+                    if self.is_cancelled():
+                        logger.info(f"{self.model_type.capitalize()} Scanner: Reconcile repair cancelled")
+                        break
+                    try:
+                        metadata, _should_skip = await MetadataManager.load_metadata(
+                            path, self.model_class
+                        )
+                        if metadata is None:
+                            # Missing or corrupt sidecar: keep the existing row
+                            # so a full rebuild can recreate the metadata from
+                            # .civitai.info (or defaults) without losing cached
+                            # fields such as tags or civitai data.
+                            logger.debug(
+                                "%s Scanner: Leaving %s unchanged (no usable metadata to repair from)",
+                                self.model_type.capitalize(),
+                                path,
+                            )
+                            continue
+
+                        payload = metadata.to_dict()
+                        unknown_fields = getattr(metadata, "_unknown_fields", None)
+                        if isinstance(unknown_fields, dict):
+                            payload.update(unknown_fields)
+
+                        if await self._sync_cache_from_metadata_impl(path, payload):
+                            total_repaired += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "%s Scanner: Failed to repair file_name for %s: %s",
+                            self.model_type.capitalize(),
+                            path,
+                            exc,
+                        )
+
             # Find missing files (in cache but not in filesystem)
             missing_files = cached_paths - found_paths
             total_removed = 0
@@ -1227,25 +1393,41 @@ class ModelScanner:
                 # Update cache data
                 self._cache.raw_data = [item for item in self._cache.raw_data if item['file_path'] not in missing_files]
             
-            dedup_removed = 0
-            seen_paths: set[str] = set()
-            deduped: list[Dict[str, Any]] = []
-            for item in reversed(self._cache.raw_data):
-                path = item.get('file_path', '')
-                if path not in seen_paths:
-                    seen_paths.add(path)
-                    deduped.append(item)
-                else:
-                    for tag in item.get('tags', []):
-                        if tag in self._tags_count:
-                            self._tags_count[tag] = max(0, self._tags_count[tag] - 1)
-                            if self._tags_count[tag] == 0:
-                                del self._tags_count[tag]
-                    dedup_removed += 1
-            if dedup_removed > 0:
-                self._cache.raw_data = list(reversed(deduped))
-                total_removed += dedup_removed
+            # Defensive integrity pass: drop entries sharing a business path.
+            # Duplicates can only be introduced by external code rewriting
+            # raw_data directly or by this pass's own appends, so an unchanged
+            # filesystem walk over a clean cache has nothing to clean. The size
+            # mismatch is an O(1) tell that the snapshot already contained
+            # duplicates; skipping the O(N) pass when it is provably clean is
+            # what keeps a no-change Refresh cheap.
+            if cached_size_before != len(cached_paths) or total_added > 0:
+                dedup_removed = 0
+                seen_paths: set[str] = set()
+                deduped: list[Dict[str, Any]] = []
+                for item in reversed(self._cache.raw_data):
+                    path = item.get('file_path', '')
+                    if path not in seen_paths:
+                        seen_paths.add(path)
+                        deduped.append(item)
+                    else:
+                        for tag in item.get('tags', []):
+                            if tag in self._tags_count:
+                                self._tags_count[tag] = max(0, self._tags_count[tag] - 1)
+                                if self._tags_count[tag] == 0:
+                                    del self._tags_count[tag]
+                        dedup_removed += 1
+                if dedup_removed > 0:
+                    self._cache.raw_data = list(reversed(deduped))
+                    total_removed += dedup_removed
             
+            # The walk above visited every directory, so refresh the recorded
+            # folder list (including empty folders) even when no model files
+            # changed — e.g. an empty folder was created or removed externally.
+            sorted_discovered = sorted(discovered_folders, key=lambda x: x.lower())
+            folders_changed = self._cache.all_folders != sorted_discovered
+            if folders_changed:
+                self._cache.all_folders = sorted_discovered
+
             # Resort cache if changes were made
             if total_added > 0 or total_removed > 0:
                 # Update folders list
@@ -1258,8 +1440,14 @@ class ModelScanner:
                 await self._cache.resort()
 
                 await self._persist_current_cache()
+            elif folders_changed:
+                await self._persist_current_cache()
                 
-            logger.info(f"{self.model_type.capitalize()} Scanner: Cache reconciliation completed in {time.time() - start_time:.2f} seconds. Added {total_added}, removed {total_removed} models.")
+            logger.info(
+                f"{self.model_type.capitalize()} Scanner: Cache reconciliation completed in "
+                f"{time.time() - start_time:.2f} seconds. Added {total_added}, "
+                f"removed {total_removed}, repaired {total_repaired} models."
+            )
             await self._broadcast_scan_progress(
                 'completed', 'process_new', 100, False,
                 added=total_added, removed=total_removed,
@@ -1297,22 +1485,436 @@ class ModelScanner:
         raise NotImplementedError("Subclasses must implement get_model_roots")
 
     async def get_all_folders(self) -> List[str]:
+        """Return every known directory under the model roots.
+
+        The directory list (including empty ones) is recorded during cache
+        scans and hydrated from the persisted snapshot, so this is a pure
+        in-memory read — no filesystem walk ever runs on the event loop
+        (walking network roots synchronously used to freeze the whole
+        server, see issue #1110). The result is unioned with the
+        model-derived folders so it is always a superset of
+        ``cache.folders``.
+
+        Cold fallback: when the cache was hydrated from a persisted snapshot
+        that predates folder recording (``all_folders is None``), a one-shot
+        background walk is scheduled off the event loop to backfill and
+        persist the list; until it lands, the models-only folders are
+        returned.
+        """
+        folders: Set[str] = set()
+        cache = self._cache
+        if cache is not None:
+            folders |= {item.get('folder', '') for item in cache.raw_data}
+            recorded = getattr(cache, 'all_folders', None)
+            if recorded is None:
+                self._schedule_all_folders_backfill()
+            else:
+                folders |= set(recorded)
+        else:
+            self._schedule_all_folders_backfill()
+
+        return sorted(folders, key=lambda x: x.lower())
+
+    async def add_known_folder(self, folder: str) -> None:
+        """Record a folder (and its parents) in the known folder list.
+
+        Called when a directory is created between scans (e.g. via the
+        create-folder API) so folder trees reflect it immediately without
+        waiting for the next reconciliation. When ``all_folders`` has not
+        been recorded yet (legacy snapshot), this is a no-op — the scheduled
+        backfill walk discovers the directory from disk instead.
+        """
+        normalized = folder.replace("\\", "/").strip("/")
+        parts = [part for part in normalized.split("/") if part]
+        if not parts:
+            return
+        cache = self._cache
+        if cache is None:
+            return
+        recorded = getattr(cache, "all_folders", None)
+        if recorded is None:
+            return
+        known = set(recorded)
+        for i in range(1, len(parts) + 1):
+            known.add("/".join(parts[:i]))
+        updated = sorted(known, key=lambda x: x.lower())
+        if updated != list(recorded):
+            cache.all_folders = updated
+            await self._persist_current_cache()
+            self.bump_cache_version()
+
+    async def remove_known_folder(self, folder: str) -> None:
+        """Forget a folder (and its subtree) that no longer exists on disk.
+
+        Counterpart of :meth:`add_known_folder`, called after a directory is
+        removed between scans (e.g. via the delete-folder API) so folder trees
+        and the move/download destination pickers stop offering it without a
+        full rescan. Ancestors are kept on purpose: every recorded ancestor
+        exists on disk in its own right, so only the removed subtree is dropped.
+
+        Cache entries that referenced the now-missing directory are purged as
+        well, which keeps a stale (phantom) model card from surviving the
+        deletion. When ``all_folders`` has not been recorded yet (legacy
+        snapshot) only the cache purge runs — the scheduled backfill walk
+        rebuilds the folder list from disk.
+        """
+        normalized = folder.replace("\\", "/").strip("/")
+        if not normalized:
+            return
+        cache = self._cache
+        if cache is None:
+            return
+
+        prefix = f"{normalized}/"
+
+        folders_changed = False
+        recorded = getattr(cache, "all_folders", None)
+        if recorded is not None:
+            updated = [
+                entry
+                for entry in recorded
+                if entry != normalized and not entry.startswith(prefix)
+            ]
+            if updated != list(recorded):
+                cache.all_folders = updated
+                folders_changed = True
+
+        stale_paths = [
+            item.get("file_path")
+            for item in (cache.raw_data or [])
+            if self._folder_within(item.get("folder", ""), normalized)
+        ]
+        if stale_paths:
+            # The purge persists the cache — including the already updated
+            # all_folders list — and bumps the version itself.
+            await self._batch_update_cache_for_deleted_models(stale_paths)
+            folders = set(item.get("folder", "") for item in cache.raw_data)
+            cache.folders = sorted(folders, key=lambda x: x.lower())
+        elif folders_changed:
+            await self._persist_current_cache()
+
+        self.bump_cache_version()
+
+    @staticmethod
+    def _folder_within(candidate: str, target: str) -> bool:
+        """Return True when *candidate* is *target* or lives below it."""
+        return candidate == target or candidate.startswith(f"{target}/")
+
+    @staticmethod
+    def _rekey_path(value: str, old_prefix: str, new_prefix: str) -> str:
+        """Move a stored path (or URL) from *old_prefix* onto *new_prefix*."""
+        if not value:
+            return value
+        normalized = value.replace("\\", "/")
+        if normalized.startswith(old_prefix):
+            return new_prefix + normalized[len(old_prefix):]
+        return value
+
+    async def rename_known_folder(
+        self,
+        previous_folder: str,
+        new_folder: str,
+        *,
+        previous_path: str,
+        new_path: str,
+    ) -> bool:
+        """Re-key folder, cache and metadata records after a directory rename.
+
+        Counterpart of :meth:`add_known_folder` / :meth:`remove_known_folder`.
+        A rename keeps every file, so nothing may be dropped: the recorded
+        folder list, the affected cache entries (``file_path``/``folder``/
+        ``preview_url``), the hash index and the on-disk metadata sidecars are
+        all rewritten onto the new prefix. That is what lets a folder full of
+        models be renamed without a rescan and without breaking per-model
+        bookkeeping.
+
+        Args:
+            previous_folder: Library-relative folder name before the rename
+            new_folder: Library-relative folder name after the rename
+            previous_path: Absolute directory path before the rename
+            new_path: Absolute directory path after the rename
+
+        Returns:
+            True when any recorded data was rewritten.
+        """
+        previous = previous_folder.replace("\\", "/").strip("/")
+        current = new_folder.replace("\\", "/").strip("/")
+        if not previous or not current or previous == current:
+            return False
+
+        old_rel_prefix = f"{previous}/"
+        new_rel_prefix = f"{current}/"
+        old_abs_prefix = f"{str(previous_path).replace(chr(92), '/').rstrip('/')}/"
+        new_abs_prefix = f"{str(new_path).replace(chr(92), '/').rstrip('/')}/"
+
+        # Centralized sidecar mode: sidecars/previews live in the mirror tree,
+        # not under the renamed model directory, so the mirror subtree must
+        # move too and mirror-prefixed preview URLs need their own rekey.
+        old_mirror_dir: Optional[str] = None
+        new_mirror_dir: Optional[str] = None
+        if is_centralized():
+            old_mirror_dir = resolve_centralized_dir_for_dir(str(previous_path))
+            new_mirror_dir = resolve_centralized_dir_for_dir(str(new_path))
+        old_mirror_prefix = (
+            f"{old_mirror_dir.replace(chr(92), '/').rstrip('/')}/"
+            if old_mirror_dir
+            else ""
+        )
+        new_mirror_prefix = (
+            f"{new_mirror_dir.replace(chr(92), '/').rstrip('/')}/"
+            if new_mirror_dir
+            else ""
+        )
+
+        cache = self._cache
+        if cache is None:
+            return False
+
+        changed = False
+
+        recorded = getattr(cache, "all_folders", None)
+        if recorded is not None:
+            rekeyed = sorted(
+                (
+                    self._rekey_folder_name(entry, previous, old_rel_prefix, new_rel_prefix)
+                    for entry in recorded
+                ),
+                key=lambda entry: entry.lower(),
+            )
+            if rekeyed != list(recorded):
+                cache.all_folders = rekeyed
+                changed = True
+
+        excluded = getattr(self, "_excluded_models", None)
+        if excluded:
+            rekeyed_excluded = [
+                self._rekey_path(entry, old_abs_prefix, new_abs_prefix)
+                for entry in excluded
+            ]
+            if rekeyed_excluded != list(excluded):
+                self._excluded_models = rekeyed_excluded
+                changed = True
+
+        touched: List[Dict[str, Any]] = []
+        for item in cache.raw_data or []:
+            folder_value = item.get("folder", "") or self._calculate_folder(
+                item.get("file_path", "")
+            )
+            if not self._folder_within(folder_value, previous):
+                continue
+
+            old_file_path = item.get("file_path", "")
+            if old_file_path:
+                cache.remove_from_version_index(item)
+                item["file_path"] = self._rekey_path(
+                    old_file_path, old_abs_prefix, new_abs_prefix
+                )
+                hash_value = (item.get("sha256") or "").lower()
+                if hash_value:
+                    self._hash_index.remove_by_path(old_file_path, hash_value)
+                    self._hash_index.add_entry(
+                        hash_value, item["file_path"], item.get("autov3") or None
+                    )
+
+            item["folder"] = self._rekey_folder_name(
+                folder_value, previous, old_rel_prefix, new_rel_prefix
+            )
+            if item.get("preview_url"):
+                item["preview_url"] = self._rekey_path(
+                    item["preview_url"], old_abs_prefix, new_abs_prefix
+                )
+                if old_mirror_prefix:
+                    item["preview_url"] = self._rekey_path(
+                        item["preview_url"], old_mirror_prefix, new_mirror_prefix
+                    )
+            touched.append(item)
+
+        if old_mirror_dir and new_mirror_dir and os.path.isdir(old_mirror_dir):
+            try:
+                os.makedirs(os.path.dirname(new_mirror_dir), exist_ok=True)
+                shutil.move(old_mirror_dir, new_mirror_dir)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to move centralized sidecar mirror %s -> %s: %s",
+                    old_mirror_dir,
+                    new_mirror_dir,
+                    exc,
+                )
+
+        if touched:
+            changed = True
+            await self._rewrite_sidecar_paths(touched)
+            folders = set(item.get("folder", "") for item in cache.raw_data)
+            cache.folders = sorted(folders, key=lambda x: x.lower())
+            cache.rebuild_version_index()
+            await cache.resort()
+
+        if changed:
+            await self._persist_current_cache()
+
+        self.bump_cache_version()
+        return changed
+
+    @staticmethod
+    def _rekey_folder_name(
+        entry: str, previous: str, old_rel_prefix: str, new_rel_prefix: str
+    ) -> str:
+        """Move a library-relative folder name (and its subtree) under a new name."""
+        if entry == previous:
+            return new_rel_prefix.rstrip("/")
+        if entry.startswith(old_rel_prefix):
+            return new_rel_prefix + entry[len(old_rel_prefix):]
+        return entry
+
+    async def _rewrite_sidecar_paths(self, entries: List[Dict[str, Any]]) -> None:
+        """Point each model's metadata sidecar at its new location.
+
+        In alongside mode sidecars travel with the renamed directory; in
+        centralized mode the mirror subtree has already been moved by the
+        caller (:meth:`rename_known_folder`). Either way only the recorded
+        ``file_path``/``preview_url`` inside them need rewriting. Failures are
+        logged and skipped — a stale sidecar is repaired by the next metadata
+        refresh, and must not abort the rename.
+        """
+        for item in entries:
+            file_path = item.get("file_path")
+            if not file_path:
+                continue
+            metadata_path = get_metadata_path(file_path)
+            if not os.path.exists(metadata_path):
+                continue
+            try:
+                await self._update_metadata_paths(metadata_path, file_path)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to rewrite metadata sidecar %s: %s", metadata_path, exc
+                )
+
+    def _find_pending_models_in_sidecar_mirror(self) -> List[Dict[str, Any]]:
+        """Mirror-tree counterpart of the alongside pending-hash filesystem scan.
+
+        Centralized mode stores ``.metadata.json`` sidecars in the mirror
+        tree, so walking the model folders finds nothing. Each mirror base is
+        resolved from a configured model root; a sidecar's recorded
+        ``file_path`` locates its model, with a stem-based probe under the
+        mapped model root as fallback (mirror path components are sanitized,
+        so reverse mapping is best-effort). Orphan sidecars whose model file
+        no longer exists are skipped, matching the alongside scan.
+        """
+
+        pending_models: List[Dict[str, Any]] = []
+
+        for root_path in self.get_model_roots():
+            mirror_base = resolve_centralized_dir_for_dir(root_path)
+            if not mirror_base or not os.path.isdir(mirror_base):
+                continue
+
+            for dirpath, dirnames, filenames in os.walk(mirror_base):
+                dirnames[:] = [d for d in dirnames if not _is_excluded_dir(d)]
+                for filename in filenames:
+                    if not filename.endswith(".metadata.json"):
+                        continue
+
+                    metadata_path = os.path.join(dirpath, filename)
+                    try:
+                        with open(metadata_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+
+                        # Check if hash is pending
+                        hash_status = data.get("hash_status", "completed")
+                        sha256 = data.get("sha256", "")
+
+                        if hash_status != "completed" or not sha256:
+                            # Find corresponding model file: prefer the
+                            # sidecar's recorded path, then probe by stem
+                            # under the mapped model root.
+                            model_path = None
+                            recorded_path = data.get("file_path")
+                            if (
+                                isinstance(recorded_path, str)
+                                and recorded_path
+                                and os.path.exists(recorded_path)
+                            ):
+                                model_path = recorded_path
+                            else:
+                                model_name = filename.replace(".metadata.json", "")
+                                rel_dir = os.path.relpath(dirpath, mirror_base)
+                                candidate_dir = (
+                                    root_path
+                                    if rel_dir == os.curdir
+                                    else os.path.join(root_path, rel_dir)
+                                )
+                                for ext in self.file_extensions:
+                                    potential_path = os.path.join(
+                                        candidate_dir, model_name + ext
+                                    )
+                                    if os.path.exists(potential_path):
+                                        model_path = potential_path
+                                        break
+
+                            if model_path:
+                                pending_models.append(
+                                    {
+                                        "file_path": model_path.replace(os.sep, "/"),
+                                        "hash_status": hash_status,
+                                        "sha256": sha256,
+                                        **{
+                                            k: v
+                                            for k, v in data.items()
+                                            if k
+                                            not in [
+                                                "file_path",
+                                                "hash_status",
+                                                "sha256",
+                                            ]
+                                        },
+                                    }
+                                )
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.debug(
+                            f"Error reading metadata file {metadata_path}: {e}"
+                        )
+                        continue
+
+        return pending_models
+
+    def _schedule_all_folders_backfill(self) -> None:
+        """Kick off a one-shot background folder walk if none is running."""
+        if self._all_folders_backfill_running:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._all_folders_backfill_running = True
+        loop.create_task(self._run_all_folders_backfill())
+
+    async def _run_all_folders_backfill(self) -> None:
+        """Walk the roots in a worker thread, then record and persist the result."""
+        try:
+            loop = asyncio.get_running_loop()
+            folders = await loop.run_in_executor(None, self._walk_all_folders_sync)
+            cache = self._cache
+            # A scan may have recorded the list while the walk was in flight;
+            # prefer the fresher scan data in that case.
+            if cache is not None and cache.all_folders is None:
+                cache.all_folders = folders
+                await self._persist_current_cache()
+        except Exception as exc:
+            logger.warning(
+                "%s Scanner: all-folders backfill failed: %s",
+                self.model_type.capitalize(),
+                exc,
+            )
+        finally:
+            self._all_folders_backfill_running = False
+
+    def _walk_all_folders_sync(self) -> List[str]:
         """Enumerate every directory under the model roots, live from disk.
 
-        Unlike the models-only ``cache.folders``, this includes empty
-        directories, so it stays accurate even when the in-memory cache was
-        hydrated from a persisted snapshot without a filesystem walk. Hidden
-        directories (any segment starting with '.') and the pending-delete
-        staging dir are excluded. The result is unioned with the model-derived
-        folders so it is always a superset of ``cache.folders``, and cached
-        for ``ALL_FOLDERS_CACHE_TTL_SECONDS`` to avoid repeated walks.
+        Runs in a worker thread. Hidden directories (any segment starting
+        with '.') and the pending-delete staging dir are excluded.
         """
-        now = time.monotonic()
-        if self._all_folders_ttl_cache is not None:
-            cached_at, cached_folders = self._all_folders_ttl_cache
-            if now - cached_at < ALL_FOLDERS_CACHE_TTL_SECONDS:
-                return cached_folders
-
         discovered: Set[str] = set()
         visited_real_paths: Set[str] = set()
 
@@ -1334,17 +1936,7 @@ class ModelScanner:
                 if rel_dir != "." and not _is_hidden_relative_path(rel_dir):
                     discovered.add(rel_dir)
 
-        folders = set(discovered)
-        if self._cache is not None:
-            folders |= {item.get('folder', '') for item in self._cache.raw_data}
-
-        result = sorted(folders, key=lambda x: x.lower())
-        self._all_folders_ttl_cache = (now, result)
-        return result
-
-    def invalidate_all_folders_cache(self) -> None:
-        """Drop the cached get_all_folders() result (e.g. after a move)."""
-        self._all_folders_ttl_cache = None
+        return sorted(discovered, key=lambda x: x.lower())
     
     async def _create_default_metadata(self, file_path: str) -> Optional[BaseModelMetadata]:
         """Get model file info and metadata (extensible for different model types)"""
@@ -1365,6 +1957,23 @@ class ModelScanner:
     def adjust_cached_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         """Hook for subclasses: adjust entries loaded from the persisted cache."""
         return entry
+
+    def _should_keep_cached_entry(self, entry: Dict[str, Any]) -> bool:
+        """Hook for subclasses: decide whether a persisted entry is still managed.
+
+        Entries rejected here are dropped (with their hash/autov3 index rows)
+        while hydrating the persisted cache, so a scanner whose configured
+        roots shrank does not surface stale models before the next reconcile.
+        """
+        return True
+
+    def resolve_sub_type_for_path(self, file_path: Optional[str]) -> Optional[str]:
+        """Hook for subclasses: resolve the location-derived sub_type for a file.
+
+        Returns ``None`` when the model type has no location-derived sub-types
+        (the default), in which case any stored value is left untouched.
+        """
+        return None
 
     @staticmethod
     def _normalize_path_value(path: Optional[str]) -> str:
@@ -1430,11 +2039,16 @@ class ModelScanner:
                     
                     file_info = next((f for f in version_info.get('files', []) if f.get('primary')), None)
                     if file_info:
-                        file_name = os.path.splitext(os.path.basename(file_path))[0]
-                        file_info['name'] = file_name
-                    
+                        local_stem = os.path.splitext(os.path.basename(file_path))[0]
+                        # from_civitai_info expects an API-shaped file entry and
+                        # strips one extension itself, so hand it the real
+                        # basename: passing the already extension-free stem made
+                        # it cut dotted names at their last dot ("lora-sd1.5-..."
+                        # became "lora-sd1", issue #1112).
+                        file_info['name'] = os.path.basename(file_path)
+
                         metadata = cast(Any, self.model_class).from_civitai_info(version_info, file_info, file_path)
-                        metadata.preview_url = find_preview_file(file_name, os.path.dirname(file_path))
+                        metadata.preview_url = find_preview_file(local_stem, get_preview_dir(file_path))
                         await MetadataManager.save_metadata(file_path, metadata)
                         logger.info(f"Created metadata from .civitai.info for {file_path} (Reason: .civitai.info was found but .metadata.json was missing)")
                 except Exception as e:
@@ -1560,6 +2174,9 @@ class ModelScanner:
         else:
             self._cache.raw_data = list(scan_result.raw_data)
 
+        if scan_result.all_folders is not None:
+            self._cache.all_folders = list(scan_result.all_folders)
+
         # resort() rebuilds folders and the version index on every path, so a
         # separate rebuild_version_index() call here would be redundant.
         await self._cache.resort()
@@ -1657,6 +2274,7 @@ class ModelScanner:
         processed_files = 0
         processed_real_files: Set[str] = set()
         visited_real_dirs: Set[str] = set()
+        discovered_folders: Set[str] = set()
 
         async def handle_progress(current_name: str = '') -> None:
             if progress_callback is None:
@@ -1735,6 +2353,13 @@ class ModelScanner:
                         elif entry.is_dir(follow_symlinks=True):
                             if _is_excluded_dir(entry.name):
                                 continue
+                            # Record every directory (including empty ones) so
+                            # the folder tree can be served without a live walk.
+                            rel_dir = os.path.relpath(
+                                os.path.abspath(entry.path), os.path.abspath(root_path)
+                            ).replace(os.path.sep, "/")
+                            if not _is_hidden_relative_path(rel_dir):
+                                discovered_folders.add(rel_dir)
                             await scan_recursive(entry.path, root_path, visited_paths)
                     except Exception as entry_error:
                         logger.error(f"Error processing entry {entry.path}: {entry_error}")
@@ -1754,7 +2379,8 @@ class ModelScanner:
             raw_data=raw_data,
             hash_index=hash_index,
             tags_count=tags_count,
-            excluded_models=excluded_models
+            excluded_models=excluded_models,
+            all_folders=sorted(discovered_folders, key=lambda x: x.lower()),
         )
 
     async def add_model_to_cache(self, metadata_dict: Dict[str, Any], folder: str = '') -> bool:
@@ -1859,43 +2485,70 @@ class ModelScanner:
             # Move all associated files with the same base name
             source_metadata = None
             moved_metadata_path = None
-            
-            # Find all files with the same base name in the source directory
+
+            # Associated files (sidecar metadata, previews) sit next to the
+            # model in alongside mode and in the mirror tree in centralized
+            # mode; collect from every directory that holds them.
+            source_sidecar_dir = get_sidecar_dir(source_path)
+            target_sidecar_dir = get_sidecar_dir(target_file)
+            associated_dirs = [(source_dir, target_path)]
+            if os.path.normpath(source_sidecar_dir) != os.path.normpath(source_dir):
+                associated_dirs.append((source_sidecar_dir, target_sidecar_dir))
+
+            # Find all files with the same base name in the source directories
             files_to_move = []
-            try:
-                for file in os.listdir(source_dir):
-                    if file.startswith(base_name + ".") and file != os.path.basename(source_path):
-                        source_file_path = os.path.join(source_dir, file)
-                        # Generate new filename with the same base name as the model file
-                        file_suffix = file[len(base_name):]  # Get the part after base_name (e.g., ".metadata.json", ".preview.png")
-                        new_associated_filename = f"{final_base_name}{file_suffix}"
-                        target_associated_path = os.path.join(target_path, new_associated_filename)
-                        
-                        # Store metadata file path for special handling
-                        if file == f"{base_name}.metadata.json":
-                            source_metadata = source_file_path
-                            moved_metadata_path = target_associated_path
-                        else:
-                            files_to_move.append((source_file_path, target_associated_path))
-            except Exception as e:
-                logger.error(f"Error listing files in {source_dir}: {e}")
-            
+            metadata_filename = os.path.basename(get_metadata_path(source_path))
+            for assoc_source_dir, assoc_target_dir in associated_dirs:
+                try:
+                    for file in os.listdir(assoc_source_dir):
+                        if file.startswith(base_name + ".") and file != os.path.basename(source_path):
+                            source_file_path = os.path.join(assoc_source_dir, file)
+                            # Generate new filename with the same base name as the model file
+                            file_suffix = file[len(base_name):]  # Get the part after base_name (e.g., ".metadata.json", ".preview.png")
+                            new_associated_filename = f"{final_base_name}{file_suffix}"
+                            target_associated_path = os.path.join(assoc_target_dir, new_associated_filename)
+
+                            # Store metadata file path for special handling
+                            if file == metadata_filename:
+                                source_metadata = source_file_path
+                                moved_metadata_path = target_associated_path
+                            else:
+                                files_to_move.append((source_file_path, target_associated_path))
+                except Exception as e:
+                    logger.error(f"Error listing files in {assoc_source_dir}: {e}")
+
             # Move all associated files
             metadata = None
             for source_file, target_file_path in files_to_move:
                 try:
+                    os.makedirs(os.path.dirname(target_file_path), exist_ok=True)
                     shutil.move(source_file, target_file_path)
                 except Exception as e:
                     logger.error(f"Error moving associated file {source_file}: {e}")
-            
+
             # Handle metadata file specially to update paths
             if source_metadata and moved_metadata_path and os.path.exists(source_metadata):
                 try:
+                    os.makedirs(os.path.dirname(moved_metadata_path), exist_ok=True)
                     shutil.move(source_metadata, moved_metadata_path)
                     metadata = await self._update_metadata_paths(moved_metadata_path, target_file)
                 except Exception as e:
                     logger.error(f"Error moving metadata file: {e}")
             
+            if metadata is not None:
+                # sub_type is derived from the model's location (e.g. a file
+                # moved from a checkpoints root into a unet root becomes a
+                # diffusion_model). Persist the recalculated value into the
+                # moved metadata file so later metadata-driven cache syncs
+                # do not revert the cache entry to the stale sub_type.
+                new_sub_type = self.resolve_sub_type_for_path(target_file)
+                if new_sub_type and metadata.get('sub_type') != new_sub_type:
+                    metadata['sub_type'] = new_sub_type
+                    try:
+                        await MetadataManager.save_metadata(moved_metadata_path, metadata)
+                    except Exception as e:
+                        logger.error(f"Error persisting sub_type for moved model: {e}")
+
             update_result = await self.update_single_model_cache(source_path, target_file, metadata, recalculate_type=True)
             
             return {
@@ -1918,7 +2571,7 @@ class ModelScanner:
             metadata['file_name'] = os.path.splitext(os.path.basename(model_path))[0]
             
             if 'preview_url' in metadata and metadata['preview_url']:
-                preview_dir = os.path.dirname(model_path)
+                preview_dir = get_preview_dir(model_path)
                 # Update preview filename to match the new base name
                 new_base_name = os.path.splitext(os.path.basename(model_path))[0]
                 preview_ext = get_preview_extension(metadata['preview_url'])
@@ -1997,16 +2650,22 @@ class ModelScanner:
             all_folders = set(item['folder'] for item in cache.raw_data)
             cache.folders = sorted(list(all_folders), key=lambda x: x.lower())
 
+            # The move target may live in directories the last scan never saw;
+            # record the destination folder (and its parents) in the known
+            # folder list so the folder tree reflects it without a rescan.
+            if cache.all_folders is not None and folder_value:
+                parts = folder_value.split("/")
+                known = set(cache.all_folders)
+                for i in range(1, len(parts) + 1):
+                    known.add("/".join(parts[:i]))
+                cache.all_folders = sorted(known, key=lambda x: x.lower())
+
             for tag in cache_entry.get('tags', []):
                 self._tags_count[tag] = self._tags_count.get(tag, 0) + 1
 
         cache.rebuild_version_index()
 
         await cache.resort()
-
-        # A move may have created new directories; drop the cached live-walk
-        # result so the next include_empty request sees them.
-        self.invalidate_all_folders_cache()
 
         if cache_modified:
             await self._persist_current_cache()
@@ -2108,6 +2767,11 @@ class ModelScanner:
             folder=folder_value,
             file_path_override=file_path,
         )
+
+        # Location-derived fields (e.g. the checkpoint sub_type) must be
+        # re-resolved from the file path rather than trusting the on-disk
+        # metadata snapshot, which may predate a cross-root move.
+        desired_entry = self.adjust_cached_entry(desired_entry)
 
         # Ensure sha256 is populated (defensive — metadata should have it)
         if (
@@ -2291,7 +2955,7 @@ class ModelScanner:
 
             # Sidecar write-back: JSON null encodes the checked-unavailable
             # state. Skip silently when the sidecar does not exist.
-            metadata_path = f"{os.path.splitext(file_path)[0]}.metadata.json"
+            metadata_path = get_metadata_path(file_path)
             if os.path.exists(metadata_path):
                 with open(metadata_path, 'r', encoding='utf-8') as handle:
                     payload = json.load(handle)
@@ -2357,7 +3021,7 @@ class ModelScanner:
         if not file_path:
             return None
 
-        dir_path = os.path.dirname(file_path)
+        dir_path = get_preview_dir(file_path)
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         preview_path = find_preview_file(base_name, dir_path)
         if preview_path:

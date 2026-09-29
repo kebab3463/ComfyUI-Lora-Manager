@@ -17,27 +17,38 @@ from dataclasses import dataclass, field
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, cast
 from urllib.parse import urlparse
-from ..utils.models import LoraMetadata, CheckpointMetadata, EmbeddingMetadata
+from ..utils.models import (
+    LoraMetadata,
+    CheckpointMetadata,
+    EmbeddingMetadata,
+    OtherModelMetadata,
+)
 from ..utils.constants import (
     CARD_PREVIEW_WIDTH,
-    DIFFUSION_MODEL_BASE_MODELS,
+    MAX_FOLDER_NAME_LENGTH,
+    MAX_PATH_TAG_LENGTH,
     MODEL_WEIGHT_FILE_TYPES,
     SUPPORTED_DOWNLOAD_SKIP_BASE_MODELS,
     VALID_LORA_TYPES,
+    VALID_OTHER_CIVITAI_TYPES,
 )
 from ..utils.civitai_utils import normalize_civitai_download_url, rewrite_preview_url
 from ..utils.file_utils import calculate_sha256, calculate_autov3
 from ..utils.preview_selection import resolve_mature_threshold, select_preview_media
-from ..utils.utils import sanitize_folder_name
+from ..utils.utils import calculate_filename_for_model, sanitize_folder_name
 from ..utils.exif_utils import ExifUtils
 from ..utils.metadata_manager import MetadataManager
+from ..utils.sidecar_paths import get_metadata_path, get_preview_dir
 from .service_registry import ServiceRegistry
+from .download_routing import is_diffusion_model_download, resolve_other_download_sub_type
 from .settings_manager import get_settings_manager
 from .metadata_service import get_default_metadata_provider, get_metadata_provider
 from .downloader import get_downloader, DownloadProgress, DownloadStreamControl
+from .errors import RateLimitError
 from .aria2_downloader import Aria2Error, get_aria2_downloader
 from .aria2_transfer_state import Aria2TransferStateStore
 from .download_queue_service import DownloadQueueService
+from .model_lifecycle_service import ModelLifecycleService, load_local_metadata
 
 # Download to temporary file first
 import tempfile
@@ -227,12 +238,21 @@ class DownloadManager:
             return False
 
     async def _get_scanner_for_model_type(self, model_type: str):
-        """Return the scanner responsible for the given model type."""
+        """Return the scanner responsible for the given model type.
+
+        Every supported type resolves explicitly — an unknown type must never
+        fall through to the lora scanner (an "other" download would silently
+        dedupe against the lora library).
+        """
         if model_type == "checkpoint":
             return await self._get_checkpoint_scanner()
         if model_type == "embedding":
             return await ServiceRegistry.get_embedding_scanner()
-        return await self._get_lora_scanner()
+        if model_type == "other":
+            return await ServiceRegistry.get_other_scanner()
+        if model_type == "lora":
+            return await self._get_lora_scanner()
+        raise ValueError(f'Unknown model type "{model_type}"')
 
     @staticmethod
     def _resolve_target_file(
@@ -812,7 +832,7 @@ class DownloadManager:
                 )
 
         for file_path in target_files:
-            metadata_path = os.path.splitext(file_path)[0] + ".metadata.json"
+            metadata_path = get_metadata_path(file_path)
             deleted = await self._delete_file_with_retries(metadata_path)
             if not deleted and os.path.exists(metadata_path):
                 logger.error(f"Error deleting metadata file: {metadata_path}")
@@ -929,6 +949,42 @@ class DownloadManager:
 
         return download_urls
 
+    async def _fetch_raw_file_name(
+        self,
+        metadata_provider,
+        version_id: Optional[int],
+        file_id: Any,
+    ) -> Optional[str]:
+        """Best-effort lookup of the raw stored filename via the CivitAI
+        model-versions/mini endpoint (#1100). Returns None on any failure so
+        the caller can fall back to the (possibly rewritten) REST name."""
+        if version_id is None or file_id is None:
+            return None
+        fetch = getattr(metadata_provider, "get_version_file_mini", None)
+        if fetch is None:
+            return None
+        try:
+            mini_info = await fetch(int(version_id), int(file_id))
+        except (TypeError, ValueError):
+            return None
+        except RateLimitError:
+            raise
+        except Exception as exc:
+            logger.debug(
+                "Mini endpoint lookup failed for version %s file %s: %s",
+                version_id,
+                file_id,
+                exc,
+            )
+            return None
+        if not isinstance(mini_info, dict):
+            return None
+        raw_name = mini_info.get("fileName")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            return None
+        # Defensive: never let a path component slip into the filename.
+        return os.path.basename(raw_name.strip()) or None
+
     def _build_metadata_for_resume(
         self,
         *,
@@ -941,6 +997,8 @@ class DownloadManager:
             return CheckpointMetadata.from_civitai_info(version_info, file_info, save_path)
         if model_type == "embedding":
             return EmbeddingMetadata.from_civitai_info(version_info, file_info, save_path)
+        if model_type == "other":
+            return OtherModelMetadata.from_civitai_info(version_info, file_info, save_path)
         return LoraMetadata.from_civitai_info(version_info, file_info, save_path)
 
     def _resolve_save_path_from_persisted_record(self, record: Dict[str, Any]) -> Optional[str]:
@@ -1401,6 +1459,7 @@ class DownloadManager:
                 lora_scanner = await self._get_lora_scanner()
                 checkpoint_scanner = await self._get_checkpoint_scanner()
                 embedding_scanner = await ServiceRegistry.get_embedding_scanner()
+                other_scanner = await ServiceRegistry.get_other_scanner()
 
                 # Check lora scanner first
                 if await lora_scanner.check_model_version_exists(model_version_id):
@@ -1423,6 +1482,13 @@ class DownloadManager:
                     return {
                         "success": False,
                         "error": "Model version already exists in embedding library",
+                    }
+
+                # Check other scanner
+                if await other_scanner.check_model_version_exists(model_version_id):
+                    return {
+                        "success": False,
+                        "error": "Model version already exists in other library",
                     }
 
             # Use CivArchive provider directly when source is 'civarchive'
@@ -1463,6 +1529,20 @@ class DownloadManager:
                 model_type = "lora"
             elif model_type_from_info == "textualinversion":
                 model_type = "embedding"
+            elif model_type_from_info in VALID_OTHER_CIVITAI_TYPES:
+                if not get_settings_manager().is_other_models_enabled():
+                    return {
+                        "success": False,
+                        "error": (
+                            "Other Models management is disabled. Enable it in "
+                            "Settings > Library before downloading VAE, upscaler, "
+                            "text encoder or CLIP files."
+                        ),
+                        # Machine-readable failure code consumed by the companion
+                        # browser extension (docs/other-models-support.md C4).
+                        "reason": "other_models_disabled",
+                    }
+                model_type = "other"
             else:
                 return {
                     "success": False,
@@ -1584,27 +1664,13 @@ class DownloadManager:
                 }
 
             # Check if this checkpoint should be treated as a diffusion model
-            # Priority: (1) any file has type "UNet" or "Diffusion Model",
-            #            (2) baseModel is in DIFFUSION_MODEL_BASE_MODELS
-            is_diffusion_model = False
-            if model_type == "checkpoint":
-                # Check file types first (more direct signal from CivitAI)
-                version_files = version_info.get("files", [])
-                for f in version_files:
-                    f_type = f.get("type", "")
-                    if f_type in ("UNet", "Diffusion Model"):
-                        is_diffusion_model = True
-                        logger.info(
-                            f"File type '{f_type}' detected, routing checkpoint to unet folder"
-                        )
-                        break
-
-                # Fallback to baseModel name check
-                if not is_diffusion_model and base_model_value in DIFFUSION_MODEL_BASE_MODELS:
-                    is_diffusion_model = True
-                    logger.info(
-                        f"baseModel '{base_model_value}' is a known diffusion model, routing to unet folder"
-                    )
+            # (shared with the download routing endpoint so the UI location
+            # step and the actual download agree on the target roots).
+            is_diffusion_model = is_diffusion_model_download(
+                model_type,
+                file_types=(f.get("type", "") for f in version_info.get("files", [])),
+                base_model=base_model_value,
+            )
 
             # Existence check after the metadata fetch (#1058):
             # - An explicit file selection only blocks when THIS file is
@@ -1663,6 +1729,13 @@ class DownloadManager:
                             "success": False,
                             "error": "Model version already exists in embedding library",
                         }
+                elif model_type == "other":
+                    other_scanner = await ServiceRegistry.get_other_scanner()
+                    if await other_scanner.check_model_version_exists(version_id):
+                        return {
+                            "success": False,
+                            "error": "Model version already exists in other library",
+                        }
 
             # Handle use_default_paths
             if use_default_paths:
@@ -1700,6 +1773,60 @@ class DownloadManager:
                             return {
                                 "success": False,
                                 "error": "Default embedding root path not set in settings",
+                            }
+                        save_dir = default_path
+                    elif model_type == "other":
+                        other_sub_type = resolve_other_download_sub_type(
+                            model_type_from_info,
+                            file_types=(
+                                f.get("type", "")
+                                for f in version_info.get("files", [])
+                                if isinstance(f, dict)
+                            ),
+                            selected_file_type=(
+                                target_file.get("type") if explicit_file else None
+                            ),
+                        )
+                        default_other_roots = (
+                            settings_manager.get("default_other_roots") or {}
+                        )
+                        if other_sub_type and not settings_manager.is_other_sub_type_enabled(
+                            other_sub_type
+                        ):
+                            return {
+                                "success": False,
+                                "error": (
+                                    f"Other-model sub-type '{other_sub_type}' is "
+                                    f"disabled in settings. Please pick a destination "
+                                    f"folder explicitly instead of using default paths."
+                                ),
+                                "reason": "other_sub_type_disabled",
+                            }
+                        default_path = (
+                            default_other_roots.get(other_sub_type)
+                            if other_sub_type
+                            else None
+                        )
+                        if not isinstance(default_path, str) or not default_path:
+                            if other_sub_type:
+                                detail = (
+                                    f"No default root configured for other-model "
+                                    f"sub-type '{other_sub_type}'"
+                                )
+                                reason = "other_no_default_root"
+                            else:
+                                detail = (
+                                    "Could not determine the other-model sub-type "
+                                    "from the model metadata"
+                                )
+                                reason = "other_sub_type_undecidable"
+                            return {
+                                "success": False,
+                                "error": (
+                                    f"{detail}. Please pick a destination folder "
+                                    f"explicitly instead of using default paths."
+                                ),
+                                "reason": reason,
                             }
                         save_dir = default_path
 
@@ -1858,6 +1985,24 @@ class DownloadManager:
             if not download_urls:
                 return {"success": False, "error": "No mirror URL found"}
 
+            # The public REST API rewrites files[].name to
+            # "{model}_{version}" for non-LoRA model types, so every
+            # precision variant of a multi-file version shares one name and
+            # lands on disk with a random short-hash suffix. The mini
+            # endpoint returns the raw stored filename (#1100). CivArchive
+            # already serves raw names.
+            if source != "civarchive":
+                raw_file_name = await self._fetch_raw_file_name(
+                    metadata_provider, resolved_version_id, file_info.get("id")
+                )
+                if raw_file_name and raw_file_name != file_info.get("name"):
+                    logger.info(
+                        "[download] Using raw stored filename '%s' instead of REST name '%s'",
+                        raw_file_name,
+                        file_info.get("name"),
+                    )
+                    file_info = {**file_info, "name": raw_file_name}
+
             # 3. Prepare download
             file_name = file_info.get("name", "")
             if not file_name:
@@ -1880,6 +2025,11 @@ class DownloadManager:
                     version_info, file_info, save_path
                 )
                 logger.info(f"Creating EmbeddingMetadata for {file_name}")
+            elif model_type == "other":
+                metadata = OtherModelMetadata.from_civitai_info(
+                    version_info, file_info, save_path
+                )
+                logger.info(f"Creating OtherModelMetadata for {file_name}")
             else:
                 return {
                     "success": False,
@@ -2092,6 +2242,8 @@ class DownloadManager:
                 scanner = await self._get_checkpoint_scanner()
             elif model_type == "embedding":
                 scanner = await ServiceRegistry.get_embedding_scanner()
+            elif model_type == "other":
+                scanner = await ServiceRegistry.get_other_scanner()
         except Exception as exc:
             logger.debug("Failed to acquire scanner for %s models: %s", model_type, exc)
 
@@ -2178,16 +2330,26 @@ class DownloadManager:
         if not first_tag:
             first_tag = "no tags"  # Default if no tags available
 
+        # Tags come straight from CivitAI, so sanitize the value before it
+        # becomes a path segment and cap its length (#1119).
+        first_tag = sanitize_folder_name(first_tag, max_length=MAX_PATH_TAG_LENGTH)
+
         # Format the template with available data
         formatted_path = path_template
         formatted_path = formatted_path.replace("{base_model}", mapped_base_model)
         formatted_path = formatted_path.replace("{first_tag}", first_tag)
         formatted_path = formatted_path.replace("{author}", author)
         formatted_path = formatted_path.replace(
-            "{model_name}", sanitize_folder_name(model_info.get("name", ""))
+            "{model_name}",
+            sanitize_folder_name(
+                model_info.get("name", ""), max_length=MAX_FOLDER_NAME_LENGTH
+            ),
         )
         formatted_path = formatted_path.replace(
-            "{version_name}", sanitize_folder_name(version_info.get("name", ""))
+            "{version_name}",
+            sanitize_folder_name(
+                version_info.get("name", ""), max_length=MAX_FOLDER_NAME_LENGTH
+            ),
         )
 
         if model_type == "embedding":
@@ -2286,7 +2448,7 @@ class DownloadManager:
                 return {"success": False, "error": save_path}
 
             part_path = save_path + ".part"
-            metadata_path = os.path.splitext(save_path)[0] + ".metadata.json"
+            metadata_path = get_metadata_path(save_path)
 
             pause_control = self._pause_events.get(download_id) if download_id else None
 
@@ -2303,6 +2465,10 @@ class DownloadManager:
             # Download preview image if available
             images = version_info.get("images", [])
             if images:
+                # Centralized preview mirrors may not exist yet (unlike the
+                # model's own directory in alongside mode).
+                os.makedirs(get_preview_dir(save_path), exist_ok=True)
+
                 if progress_callback:
                     await progress_callback(
                         1
@@ -2342,7 +2508,10 @@ class DownloadManager:
 
                     if media_type == "video":
                         preview_ext = _extension_from_url(preview_url, ".mp4")
-                        preview_path = os.path.splitext(save_path)[0] + preview_ext
+                        preview_path = os.path.join(
+                            get_preview_dir(save_path),
+                            os.path.splitext(os.path.basename(save_path))[0] + preview_ext,
+                        )
                         rewritten_url, rewritten = rewrite_preview_url(
                             preview_url, media_type="video"
                         )
@@ -2369,7 +2538,10 @@ class DownloadManager:
                         )
                         if rewritten and rewritten_url:
                             preview_ext = _extension_from_url(preview_url, ".png")
-                            preview_path = os.path.splitext(save_path)[0] + preview_ext
+                            preview_path = os.path.join(
+                                get_preview_dir(save_path),
+                                os.path.splitext(os.path.basename(save_path))[0] + preview_ext,
+                            )
                             success, _ = await downloader.download_file(
                                 rewritten_url, preview_path, use_auth=False
                             )
@@ -2396,8 +2568,9 @@ class DownloadManager:
                                         temp_file_handle.write(
                                             content if isinstance(content, bytes) else content.encode("utf-8")
                                         )
-                                    preview_path = (
-                                        os.path.splitext(save_path)[0] + ".webp"
+                                    preview_path = os.path.join(
+                                        get_preview_dir(save_path),
+                                        os.path.splitext(os.path.basename(save_path))[0] + ".webp",
                                     )
 
                                     optimized_data, _ = ExifUtils.optimize_image(
@@ -2588,6 +2761,9 @@ class DownloadManager:
             elif model_type == "embedding":
                 scanner = await ServiceRegistry.get_embedding_scanner()
                 logger.info(f"Updating embedding cache for {actual_file_paths[0]}")
+            elif model_type == "other":
+                scanner = await ServiceRegistry.get_other_scanner()
+                logger.info(f"Updating other-model cache for {actual_file_paths[0]}")
 
             adjust_cached_entry = (
                 getattr(scanner, "adjust_cached_entry", None)
@@ -2595,6 +2771,7 @@ class DownloadManager:
                 else None
             )
 
+            downloaded_metadata: List[Dict[str, Any]] = []
             for index, entry in enumerate(metadata_entries):
                 file_path_for_adjust = getattr(
                     entry, "file_path", actual_file_paths[index]
@@ -2623,9 +2800,7 @@ class DownloadManager:
                             entry = cast(Any, adjusted_entry)
                             metadata_entries[index] = entry
 
-                metadata_file_path = (
-                    os.path.splitext(entry.file_path)[0] + ".metadata.json"
-                )
+                metadata_file_path = get_metadata_path(entry.file_path)
                 metadata_files_for_cleanup.append(metadata_file_path)
 
                 await MetadataManager.save_metadata(entry.file_path, entry)
@@ -2636,6 +2811,15 @@ class DownloadManager:
 
                 if scanner is not None:
                     await scanner.add_model_to_cache(metadata_dict, relative_path)
+
+                downloaded_metadata.append(metadata_dict)
+
+            await self._apply_download_filename_template(
+                scanner=scanner,
+                model_type=model_type,
+                downloaded_metadata=downloaded_metadata,
+                download_id=download_id,
+            )
 
             if transfer_backend == "aria2" and download_id:
                 await self._aria2_state_store.remove(download_id)
@@ -2676,8 +2860,85 @@ class DownloadManager:
 
             return {"success": False, "error": str(e)}
 
+    async def _apply_download_filename_template(
+        self,
+        *,
+        scanner,
+        model_type: str,
+        downloaded_metadata: List[Dict[str, Any]],
+        download_id: Optional[str],
+    ) -> None:
+        """Rename freshly downloaded models according to the filename template.
+
+        Best-effort post-download step: any failure (including name conflicts)
+        is logged and skipped so a successful download is never turned into a
+        failure by a rename problem.
+        """
+        try:
+            if scanner is None or not downloaded_metadata:
+                return
+
+            template = get_settings_manager().get_download_filename_template(
+                model_type
+            )
+            if not template:
+                return
+
+            lifecycle_service = ModelLifecycleService(
+                scanner=scanner,
+                metadata_manager=MetadataManager,
+                metadata_loader=load_local_metadata,
+                recipe_scanner_factory=ServiceRegistry.get_recipe_scanner,
+            )
+
+            for metadata_dict in downloaded_metadata:
+                file_path = metadata_dict.get("file_path")
+                if not isinstance(file_path, str) or not file_path:
+                    continue
+
+                new_stem = calculate_filename_for_model(metadata_dict, model_type)
+                if not new_stem:
+                    continue
+
+                current_stem = os.path.splitext(os.path.basename(file_path))[0]
+                if new_stem == current_stem or os.path.normcase(
+                    new_stem
+                ) == os.path.normcase(current_stem):
+                    continue
+
+                try:
+                    result = await lifecycle_service.rename_model(
+                        file_path=file_path, new_file_name=new_stem
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "Keeping original filename for %s: %s", file_path, exc
+                    )
+                    continue
+
+                new_file_path = result.get("new_file_path")
+                if download_id and isinstance(new_file_path, str):
+                    info = self._active_downloads.get(download_id)
+                    if info is None:
+                        continue
+                    if info.get("file_path") == file_path:
+                        info["file_path"] = new_file_path
+                    extracted = info.get("extracted_paths")
+                    if isinstance(extracted, list):
+                        info["extracted_paths"] = [
+                            new_file_path if path == file_path else path
+                            for path in extracted
+                        ]
+        except Exception as exc:  # Rename phase must never fail the download
+            logger.warning(
+                "Filename template rename failed for %s download: %s",
+                model_type,
+                exc,
+                exc_info=True,
+            )
+
     def _get_supported_extensions_for_type(self, model_type: str) -> Set[str]:
-        if model_type == "checkpoint":
+        if model_type in ("checkpoint", "other"):
             return {
                 ".ckpt",
                 ".pt",
@@ -2798,7 +3059,11 @@ class DownloadManager:
         extension = os.path.splitext(preview_path)[1] or ".webp"
 
         targets = [
-            os.path.splitext(entry.file_path)[0] + extension for entry in entries
+            os.path.join(
+                get_preview_dir(entry.file_path),
+                os.path.splitext(os.path.basename(entry.file_path))[0] + extension,
+            )
+            for entry in entries
         ]
 
         if not targets:
@@ -2806,10 +3071,12 @@ class DownloadManager:
 
         first_target = targets[0]
         if preview_path != first_target:
+            os.makedirs(os.path.dirname(first_target), exist_ok=True)
             os.replace(preview_path, first_target)
         source_path = first_target
 
         for target in targets[1:]:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.copyfile(source_path, target)
 
         return targets
