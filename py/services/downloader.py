@@ -360,8 +360,16 @@ class Downloader:
             limit=8,  # Concurrent connections
             ttl_dns_cache=300,  # DNS cache timeout
             force_close=False,  # Keep connections for reuse
-            enable_cleanup_closed=True,
         )
+        # The SSL-transport cleanup task is only needed on Python builds without
+        # https://github.com/python/cpython/pull/118960 (pre-3.12.8 / 3.13.0);
+        # aiohttp ignores the flag and warns on fixed builds.
+        try:
+            from aiohttp.connector import NEEDS_CLEANUP_CLOSED
+        except ImportError:  # older aiohttp without the guard
+            NEEDS_CLEANUP_CLOSED = True
+        if NEEDS_CLEANUP_CLOSED:
+            connector_kwargs["enable_cleanup_closed"] = True
         if socks_proxy_url:
             # Route all traffic through the SOCKS proxy via aiohttp-socks. The
             # connector tunnels every connection, so no per-request `proxy=` is
