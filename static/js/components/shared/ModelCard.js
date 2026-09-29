@@ -9,6 +9,7 @@ import { NSFW_LEVELS, getBaseModelAbbreviation, getSubTypeAbbreviation, getMatur
 import { MODEL_TYPES } from '../../api/apiConfig.js';
 import { getModelApiClient } from '../../api/modelApiFactory.js';
 import { showDeleteModal } from '../../utils/modalUtils.js';
+import { togglePromoteNvme, togglePinNvme, applyNvmeCardState, runNvmeCardAction } from '../../utils/nvmeCache.js';
 import { translate } from '../../utils/i18nHelpers.js';
 import { eventManager } from '../../utils/EventManager.js';
 
@@ -134,6 +135,18 @@ function handleModelCardEvent_internal(event, modelType) {
     if (event.target.closest('.fa-paper-plane')) {
         event.stopPropagation();
         handleSendToWorkflow(card, event.shiftKey, modelType);
+        return true; // Stop propagation
+    }
+
+    if (event.target.closest('.nvme-promote')) {
+        event.stopPropagation();
+        runNvmeCardAction(card, togglePromoteNvme);
+        return true; // Stop propagation
+    }
+
+    if (event.target.closest('.nvme-pin')) {
+        event.stopPropagation();
+        runNvmeCardAction(card, togglePinNvme);
         return true; // Stop propagation
     }
 
@@ -718,6 +731,10 @@ export function createModelCard(model, modelType) {
         </i>
         <i class="fas fa-copy" 
            title="${copyTitle}">
+        </i>
+        <i class="fas fa-hard-drive nvme-promote" style="display: none">
+        </i>
+        <i class="fas fa-thumbtack nvme-pin" style="display: none">
         </i>`;
 
     // Generate UI text with i18n support
@@ -886,6 +903,9 @@ export function createModelCard(model, modelType) {
         // uploadPreview handles loading state, card refresh and error toasts internally.
         getModelApiClient().uploadPreview(filePath, file);
     });
+
+    // Reveals and labels the NVMe icons once the batched status lookup lands.
+    applyNvmeCardState(card);
 
     return card;
 }

@@ -9,11 +9,36 @@ import { getNsfwLevelSelector } from '../shared/NsfwLevelSelector.js';
 import { classifyModelRelinkUrl } from '../../utils/civitaiUtils.js';
 import { parseModelSourceUrl, getModelSourceInfo } from '../../utils/modelSourceHelpers.js';
 import { escapeHtml } from '../shared/utils.js';
+import { togglePromoteNvme, togglePinNvme, getNvmeStatus, nvmeActionLabels, runNvmeCardAction } from '../../utils/nvmeCache.js';
 
 // Mixin with shared functionality for LoraContextMenu and CheckpointContextMenu
 export const ModelContextMenuMixin = {
     isExcludedView() {
         return state?.pages?.[state.currentPageType]?.viewMode === 'excluded';
+    },
+
+    // Points the two NVMe items at the actions this model currently supports:
+    // a model already on NVMe offers Demote, a pinned one offers Unpin. The
+    // status lookup is batched and memoised, so for a card already on screen
+    // this resolves without a round trip; a menu has to open instantly, so the
+    // items carry their promote/pin labels until the answer lands.
+    async updateNvmeMenuItems(card) {
+        const promoteItem = this.menu?.querySelector('[data-action="nvme-promote"]');
+        const pinItem = this.menu?.querySelector('[data-action="nvme-pin"]');
+        if (!promoteItem || !pinItem) return;
+
+        const filePath = card?.dataset?.filepath;
+        const info = filePath ? await getNvmeStatus(filePath) : null;
+
+        // Models the cache does not manage get the items hidden, rather than
+        // offering an action that could only fail.
+        promoteItem.style.display = info ? '' : 'none';
+        pinItem.style.display = info ? '' : 'none';
+        if (!info) return;
+
+        const labels = nvmeActionLabels(info.status);
+        promoteItem.querySelector('span').textContent = labels.promote.label;
+        pinItem.querySelector('span').textContent = labels.pin.label;
     },
 
     // Reflects the current card's pin state, and disables the item for models
@@ -598,6 +623,12 @@ export const ModelContextMenuMixin = {
                 return true;
             case 'pin-version':
                 this.togglePinVersion();
+                return true;
+            case 'nvme-promote':
+                runNvmeCardAction(this.currentCard, togglePromoteNvme);
+                return true;
+            case 'nvme-pin':
+                runNvmeCardAction(this.currentCard, togglePinNvme);
                 return true;
             default:
                 return false;

@@ -2,6 +2,7 @@ import { api } from "../../scripts/api.js";
 import { app } from "../../scripts/app.js";
 import { createMenuItem, createDropIndicator } from "./loras_widget_components.js";
 import { parseLoraValue, formatLoraValue, syncClipStrengthIfCollapsed, saveRecipeDirectly, copyToClipboard, showToast, moveLoraByDirection, getDropTargetIndex, getLoraStrengthRange, applyStrengthRangeCue } from "./loras_widget_utils.js";
+import { createNvmeMenuItems } from "./nvme_cache_actions.js";
 
 // Function to handle strength adjustment via dragging
 export function handleStrengthDrag(name, initialStrength, initialX, event, widget, isClipStrength = false, updateWidget = true) {
@@ -1054,6 +1055,13 @@ export function createContextMenu(x, y, loraName, widget, previewTooltip, render
     }
   );
 
+  // NVMe cache actions, mirroring the same two items on the LoRA Manager cards.
+  // They relabel themselves to Demote/Unpin once the cache status lands.
+  const [promoteToNvmeOption, pinToNvmeOption] = createNvmeMenuItems(loraName, () => {
+    menu.remove();
+    document.removeEventListener('click', closeMenu);
+  });
+
   // Add separator
   const separator1 = document.createElement('hr');
 
@@ -1062,6 +1070,9 @@ export function createContextMenu(x, y, loraName, widget, previewTooltip, render
 
   // Add separator for order options
   const orderSeparator = document.createElement('hr');
+
+  // Add separator for the NVMe cache group
+  const nvmeSeparator = document.createElement('hr');
 
   menu.appendChild(viewOnCivitaiOption);
   menu.appendChild(favoriteOption);
@@ -1074,6 +1085,9 @@ export function createContextMenu(x, y, loraName, widget, previewTooltip, render
   menu.appendChild(orderSeparator);
   menu.appendChild(copyNotesOption);
   menu.appendChild(copyTriggerWordsOption);
+  menu.appendChild(nvmeSeparator);
+  menu.appendChild(promoteToNvmeOption);
+  menu.appendChild(pinToNvmeOption);
   menu.appendChild(separator2);
   menu.appendChild(saveOption);
   

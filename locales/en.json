@@ -155,7 +155,11 @@
       "embeddingNameCopied": "Embedding syntax copied",
       "modelNameCopied": "Model name copied",
       "sendCheckpointToWorkflow": "Send to ComfyUI",
-      "sendEmbeddingToWorkflow": "Send to ComfyUI"
+      "sendEmbeddingToWorkflow": "Send to ComfyUI",
+      "promoteToNvme": "Promote to NVMe (copy onto the fast cache)",
+      "pinToNvme": "Pin to NVMe (keep on the fast cache, never evict)",
+      "demoteFromNvme": "Demote from NVMe (remove from the fast cache)",
+      "unpinFromNvme": "Unpin from NVMe (allow it to be evicted again)"
     },
     "nsfw": {
       "matureContent": "Mature Content",
@@ -1028,7 +1032,11 @@
       "pinVersion": "Pin this version",
       "unpinVersion": "Unpin version",
       "pinVersionTooltip": "Show this version on the grouped card instead of the latest one",
-      "pinVersionUngroupable": "This model has no Civitai or HuggingFace group to pin within"
+      "pinVersionUngroupable": "This model has no Civitai or HuggingFace group to pin within",
+      "promoteToNvme": "Promote to NVMe",
+      "pinToNvme": "Pin to NVMe",
+      "demoteFromNvme": "Demote from NVMe",
+      "unpinFromNvme": "Unpin from NVMe"
     }
   },
   "recipes": {

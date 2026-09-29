@@ -155,7 +155,11 @@
             "embeddingNameCopied": "Sintaxis de embedding copiada",
             "modelNameCopied": "Nombre del modelo copiado",
             "sendCheckpointToWorkflow": "Enviar a ComfyUI",
-            "sendEmbeddingToWorkflow": "Enviar a ComfyUI"
+            "sendEmbeddingToWorkflow": "Enviar a ComfyUI",
+            "promoteToNvme": "Promover a NVMe (copiar a la caché rápida)",
+            "pinToNvme": "Fijar en NVMe (mantener en la caché rápida, nunca expulsar)",
+            "demoteFromNvme": "Retirar de NVMe (eliminar de la caché rápida)",
+            "unpinFromNvme": "Dejar de fijar en NVMe (podrá volver a expulsarse)"
         },
         "nsfw": {
             "matureContent": "Contenido para adultos",
@@ -1028,7 +1032,11 @@
             "pinVersion": "[TODO: Translate] Pin this version",
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
-            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "promoteToNvme": "Promover a NVMe",
+            "pinToNvme": "Fijar en NVMe",
+            "demoteFromNvme": "Retirar de NVMe",
+            "unpinFromNvme": "Dejar de fijar en NVMe"
         }
     },
     "recipes": {

@@ -155,7 +155,11 @@
             "embeddingNameCopied": "已複製 Embedding 語法",
             "modelNameCopied": "模型名稱已複製",
             "sendCheckpointToWorkflow": "傳送到 ComfyUI",
-            "sendEmbeddingToWorkflow": "傳送到 ComfyUI"
+            "sendEmbeddingToWorkflow": "傳送到 ComfyUI",
+            "promoteToNvme": "提升到 NVMe（複製到高速快取）",
+            "pinToNvme": "釘選到 NVMe（保留在高速快取中，不會被清除）",
+            "demoteFromNvme": "從 NVMe 降級（從高速快取中移除）",
+            "unpinFromNvme": "取消釘選到 NVMe（可再次被清除）"
         },
         "nsfw": {
             "matureContent": "成熟內容",
@@ -1028,7 +1032,11 @@
             "pinVersion": "[TODO: Translate] Pin this version",
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
-            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "promoteToNvme": "提升到 NVMe",
+            "pinToNvme": "釘選到 NVMe",
+            "demoteFromNvme": "從 NVMe 降級",
+            "unpinFromNvme": "取消釘選到 NVMe"
         }
     },
     "recipes": {

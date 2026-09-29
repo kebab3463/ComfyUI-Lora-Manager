@@ -155,7 +155,11 @@
             "embeddingNameCopied": "Синтаксис embedding скопирован",
             "modelNameCopied": "Имя модели скопировано",
             "sendCheckpointToWorkflow": "Отправить в ComfyUI",
-            "sendEmbeddingToWorkflow": "Отправить в ComfyUI"
+            "sendEmbeddingToWorkflow": "Отправить в ComfyUI",
+            "promoteToNvme": "Переместить на NVMe (скопировать в быстрый кэш)",
+            "pinToNvme": "Закрепить на NVMe (хранить в быстром кэше, никогда не вытеснять)",
+            "demoteFromNvme": "Убрать с NVMe (удалить из быстрого кэша)",
+            "unpinFromNvme": "Открепить от NVMe (снова может быть вытеснен)"
         },
         "nsfw": {
             "matureContent": "Контент для взрослых",
@@ -1028,7 +1032,11 @@
             "pinVersion": "[TODO: Translate] Pin this version",
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
-            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "promoteToNvme": "Переместить на NVMe",
+            "pinToNvme": "Закрепить на NVMe",
+            "demoteFromNvme": "Убрать с NVMe",
+            "unpinFromNvme": "Открепить от NVMe"
         }
     },
     "recipes": {

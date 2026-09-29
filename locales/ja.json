@@ -155,7 +155,11 @@
             "embeddingNameCopied": "Embedding構文をコピーしました",
             "modelNameCopied": "モデル名をコピーしました",
             "sendCheckpointToWorkflow": "ComfyUIに送信",
-            "sendEmbeddingToWorkflow": "ComfyUIに送信"
+            "sendEmbeddingToWorkflow": "ComfyUIに送信",
+            "promoteToNvme": "NVMe に昇格（高速キャッシュにコピー）",
+            "pinToNvme": "NVMe に固定（高速キャッシュに保持し、削除しない）",
+            "demoteFromNvme": "NVMe から降格（高速キャッシュから削除）",
+            "unpinFromNvme": "NVMe の固定を解除（再び削除対象になります）"
         },
         "nsfw": {
             "matureContent": "成人向けコンテンツ",
@@ -1028,7 +1032,11 @@
             "pinVersion": "[TODO: Translate] Pin this version",
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
-            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "promoteToNvme": "NVMe に昇格",
+            "pinToNvme": "NVMe に固定",
+            "demoteFromNvme": "NVMe から降格",
+            "unpinFromNvme": "NVMe の固定を解除"
         }
     },
     "recipes": {

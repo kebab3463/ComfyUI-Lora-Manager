@@ -155,7 +155,11 @@
             "embeddingNameCopied": "תחביר Embedding הועתק",
             "modelNameCopied": "שם המודל הועתק",
             "sendCheckpointToWorkflow": "שלח ל-ComfyUI",
-            "sendEmbeddingToWorkflow": "שלח ל-ComfyUI"
+            "sendEmbeddingToWorkflow": "שלח ל-ComfyUI",
+            "promoteToNvme": "קידום ל-NVMe (העתקה למטמון המהיר)",
+            "pinToNvme": "הצמדה ל-NVMe (שמירה במטמון המהיר, ללא פינוי)",
+            "demoteFromNvme": "הורדה מ-NVMe (הסרה מהמטמון המהיר)",
+            "unpinFromNvme": "ביטול הצמדה ל-NVMe (ניתן יהיה לפנות אותו שוב)"
         },
         "nsfw": {
             "matureContent": "תוכן למבוגרים",
@@ -1028,7 +1032,11 @@
             "pinVersion": "[TODO: Translate] Pin this version",
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
-            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "promoteToNvme": "קידום ל-NVMe",
+            "pinToNvme": "הצמדה ל-NVMe",
+            "demoteFromNvme": "הורדה מ-NVMe",
+            "unpinFromNvme": "ביטול הצמדה ל-NVMe"
         }
     },
     "recipes": {

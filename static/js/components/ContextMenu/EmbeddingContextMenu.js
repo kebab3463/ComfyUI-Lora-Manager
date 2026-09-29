@@ -24,6 +24,7 @@ export class EmbeddingContextMenu extends BaseContextMenu {
         super.showMenu(x, y, card);
         this.updateExcludeMenuItem();
         this.updatePinMenuItem(card);
+        this.updateNvmeMenuItems(card);
     }
     
     handleMenuAction(action) {

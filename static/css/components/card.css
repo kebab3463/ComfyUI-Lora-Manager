@@ -380,6 +380,27 @@
     border-radius: var(--border-radius-xs);
 }
 
+/* NVMe cache actions. The lit state means the model is already on NVMe (or
+   pinned), so clicking the icon demotes/unpins it rather than promoting. The
+   icons stay hidden until their status lookup lands, and for models the cache
+   does not manage they stay hidden for good. */
+.card-actions i.nvme-active {
+    color: var(--lora-accent);
+}
+
+/* An NVMe operation is in flight for this card. The progress panel carries the
+   detail; this just marks which card the work belongs to. */
+.card-actions i.nvme-busy {
+    opacity: 0.5;
+    pointer-events: none;
+    animation: nvme-busy-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes nvme-busy-pulse {
+    0%, 100% { opacity: 0.35; }
+    50%      { opacity: 0.85; }
+}
+
 .favorite-active {
     color: var(--favorite-color) !important;
     text-shadow: 0 0 5px var(--favorite-glow);

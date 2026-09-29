@@ -33,6 +33,10 @@
     <div class="context-menu-item" data-action="copyname"><i class="fas fa-copy"></i> {{ t('loras.contextMenu.copyFilename') }}</div>
     <div class="context-menu-item" data-action="sendworkflow"><i class="fas fa-paper-plane"></i> {{ t('checkpoints.contextMenu.sendToWorkflow') }}</div>
     <div class="context-menu-separator menu-section-break"></div>
+    <!-- NVMe Cache -->
+    <div class="context-menu-item" data-action="nvme-promote"><i class="fas fa-hard-drive"></i> <span>{{ t('loras.contextMenu.promoteToNvme') }}</span></div>
+    <div class="context-menu-item" data-action="nvme-pin"><i class="fas fa-thumbtack"></i> <span>{{ t('loras.contextMenu.pinToNvme') }}</span></div>
+    <div class="context-menu-separator menu-section-break"></div>
     <!-- Media / Preview -->
     <div class="context-menu-item" data-action="preview"><i class="fas fa-folder-open"></i> {{ t('loras.contextMenu.openExamples') }}</div>
     <div class="context-menu-item has-submenu" data-has-submenu="download-examples"><i class="fas fa-download"></i> {{ t('loras.contextMenu.downloadExamples') }} <i class="fas fa-chevron-right submenu-arrow"></i>

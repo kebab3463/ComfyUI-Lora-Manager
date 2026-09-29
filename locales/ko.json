@@ -155,7 +155,11 @@
             "embeddingNameCopied": "Embedding 구문 복사됨",
             "modelNameCopied": "모델 이름 복사됨",
             "sendCheckpointToWorkflow": "ComfyUI로 전송",
-            "sendEmbeddingToWorkflow": "ComfyUI로 전송"
+            "sendEmbeddingToWorkflow": "ComfyUI로 전송",
+            "promoteToNvme": "NVMe로 승격 (빠른 캐시로 복사)",
+            "pinToNvme": "NVMe에 고정 (빠른 캐시에 유지, 제거되지 않음)",
+            "demoteFromNvme": "NVMe에서 강등 (빠른 캐시에서 제거)",
+            "unpinFromNvme": "NVMe 고정 해제 (다시 제거될 수 있음)"
         },
         "nsfw": {
             "matureContent": "성인 콘텐츠",
@@ -1028,7 +1032,11 @@
             "pinVersion": "[TODO: Translate] Pin this version",
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
-            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within"
+            "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "promoteToNvme": "NVMe로 승격",
+            "pinToNvme": "NVMe에 고정",
+            "demoteFromNvme": "NVMe에서 강등",
+            "unpinFromNvme": "NVMe 고정 해제"
         }
     },
     "recipes": {
