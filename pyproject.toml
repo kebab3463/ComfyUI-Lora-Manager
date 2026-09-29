@@ -3,27 +3,37 @@ name = "comfyui-lora-manager"
 description = "Revolutionize your workflow with the ultimate LoRA companion for ComfyUI!"
 version = "1.2.4"
 license = {file = "LICENSE"}
+requires-python = "==3.12.*"
 dependencies = [
     "aiohttp",
     "jinja2",
     "safetensors",
     "piexif",
-    "Pillow",
+    "pillow",
     "olefile", # for getting rid of warning message
     "toml",
     "natsort",
-    "GitPython",
+    "gitpython",
     "aiosqlite",
     "platformdirs",
     "pyyaml",
-    "pytest>=9.1.1",
+    "pytest>=7.4",
+    "brotli>=1.2.0",
+    "numpy>=2.5.2",
+    "syrupy>=5.0",
+    "hypothesis>=6.0",
+    "aiohttp-socks>=0.12.0",
+    "beautifulsoup4>=4.15.0",
+    "pytest-cov>=4.1",
+    "pytest-asyncio>=0.21.0",
+    "pytest-benchmark>=5.0",
 ]
 
 [project.urls]
-Repository = "https://github.com/willmiao/ComfyUI-Lora-Manager"
+Repository = "https://github.com/kebab3463/ComfyUI-Lora-Manager"
 #  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]
-PublisherId = "willmiao"
+PublisherId = "kebab3463"
 DisplayName = "ComfyUI-Lora-Manager"
-Icon = "https://github.com/willmiao/ComfyUI-Lora-Manager/blob/main/static/images/android-chrome-512x512.png?raw=true"
+Icon = "https://github.com/kebab3463/ComfyUI-Lora-Manager/blob/main/static/images/android-chrome-512x512.png?raw=true"
