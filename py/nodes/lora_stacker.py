@@ -1,6 +1,6 @@
 import os
 from ..utils.utils import get_lora_info
-from .utils import FlexibleOptionalInputType, any_type, apply_lora_syntax_format, extract_lora_name, get_loras_list, validate_lora_entries
+from .utils import FlexibleOptionalInputType, any_type, apply_lora_syntax_format, extract_lora_name, get_loras_list, validate_lora_entries, library_trigger_words_fingerprint
 
 import logging
 
@@ -27,6 +27,11 @@ class LoraStackerLM:
     def VALIDATE_INPUTS(cls, loras=None):
         """Queue-time validation: reject missing local LoRAs before execution."""
         return validate_lora_entries({"loras": loras}) or True
+
+    @classmethod
+    async def IS_CHANGED(cls, **kwargs):
+        # trigger_words come from the library, not the inputs: re-run after an edit.
+        return await library_trigger_words_fingerprint()
 
     RETURN_TYPES = ("LORA_STACK", "STRING", "STRING")
     RETURN_NAMES = ("LORA_STACK", "trigger_words", "active_loras")

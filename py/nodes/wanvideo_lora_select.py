@@ -1,7 +1,7 @@
 import os
 from ..utils.utils import get_lora_info_absolute
 from ..config import config
-from .utils import FlexibleOptionalInputType, any_type, get_loras_list, validate_lora_entries
+from .utils import FlexibleOptionalInputType, any_type, get_loras_list, validate_lora_entries, library_trigger_words_fingerprint
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,11 @@ class WanVideoLoraSelectLM:
     def VALIDATE_INPUTS(cls, loras=None):
         """Queue-time validation: reject missing local LoRAs before execution."""
         return validate_lora_entries({"loras": loras}) or True
+
+    @classmethod
+    async def IS_CHANGED(cls, **kwargs):
+        # trigger_words come from the library, not the inputs: re-run after an edit.
+        return await library_trigger_words_fingerprint()
 
     RETURN_TYPES = ("WANVIDLORA", "STRING", "STRING")
     RETURN_NAMES = ("lora", "trigger_words", "active_loras")
