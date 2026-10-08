@@ -63,6 +63,9 @@ from ...utils.url_utils import relative_root_prefix
 # so it asks get_paginated_data for a single page large enough to hold it.
 SCOPED_REFRESH_PAGE_SIZE = 1_000_000
 
+# Inclusive YYYY-MM-DD bound for the Civitai publish-date filter.
+_ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 LICENSE_FIELDS = (
     "allowNoCredit",
     "allowCommercialUse",
@@ -444,6 +447,14 @@ class ModelListingHandler:
             request.query.get("name_pattern_use_regex", "false").lower() == "true"
         )
 
+        # Civitai publish-date range (inclusive YYYY-MM-DD bounds)
+        published_from = request.query.get("published_from")
+        if not (published_from and _ISO_DAY_RE.match(published_from)):
+            published_from = None
+        published_to = request.query.get("published_to")
+        if not (published_to and _ISO_DAY_RE.match(published_to)):
+            published_to = None
+
         # Group-by-model flag: deduplicate versions sharing the same civitai modelId
         group_by_model = (
             request.query.get("group_by_model", "false").lower() == "true"
@@ -484,6 +495,8 @@ class ModelListingHandler:
             "name_pattern_use_regex": name_pattern_use_regex,
             "group_by_model": group_by_model,
             "civitai_model_id": civitai_model_id,
+            "published_from": published_from,
+            "published_to": published_to,
             **self._parse_specific_params(request),
         }
 
@@ -1006,6 +1019,41 @@ class ModelManagementHandler:
             )
         except Exception as exc:
             self._logger.error("Error pinning version: %s", exc, exc_info=True)
+            return web.Response(text=str(exc), status=500)
+
+    async def set_separate_card(self, request: web.Request) -> web.Response:
+        """Show a version as its own card instead of inside its model group.
+
+        With ``all_versions`` the flag is applied to every local version of the
+        model, which splits (or merges back) the whole group in one request.
+        """
+        try:
+            data = await request.json()
+            file_path = data.get("file_path")
+            if not file_path:
+                return web.Response(text="File path is required", status=400)
+
+            separate = bool(data.get("separate", True))
+
+            if data.get("all_versions"):
+                versions = await self._service.find_model_versions(file_path)
+                paths = [item["file_path"] for item in versions if item.get("file_path")]
+            else:
+                paths = [file_path]
+
+            for path in paths:
+                await self._metadata_sync.save_metadata_updates(
+                    file_path=path,
+                    updates={"separate_card": separate},
+                    metadata_loader=self._metadata_sync.load_local_metadata,
+                    update_cache=self._service.scanner.update_single_model_cache,
+                )
+
+            return web.json_response(
+                {"success": True, "separate": separate, "file_paths": paths}
+            )
+        except Exception as exc:
+            self._logger.error("Error setting separate card: %s", exc, exc_info=True)
             return web.Response(text=str(exc), status=500)
 
     async def add_tags(self, request: web.Request) -> web.Response:
@@ -3694,6 +3742,7 @@ class ModelUpdateHandler:
             "priceCheckedAt": getattr(version, "price_checked_at", None),
             "filePath": context.get("file_path"),
             "fileName": context.get("file_name"),
+            "separateCard": bool(context.get("separate_card", False)),
             # Weight-file variant count (None when unknown); lets the UI hide
             # the download affordance for single-file in-library versions.
             "fileCount": getattr(version, "file_count", None),
@@ -3755,6 +3804,7 @@ class ModelUpdateHandler:
                 )
                 context_entry["file_path"] = cache_entry.get("file_path")
                 context_entry["file_name"] = cache_entry.get("file_name")
+                context_entry["separate_card"] = bool(cache_entry.get("separate_card"))
                 if isinstance(preview, str) and preview:
                     context_entry["preview_override"] = config.get_preview_static_url(
                         preview
@@ -3795,6 +3845,7 @@ class ModelHandlerSet:
             "set_preview_from_url": self.management.set_preview_from_url,
             "save_metadata": self.management.save_metadata,
             "pin_version": self.management.pin_version,
+            "set_separate_card": self.management.set_separate_card,
             "add_tags": self.management.add_tags,
             "rename_model": self.management.rename_model,
             "bulk_delete_models": self.management.bulk_delete_models,

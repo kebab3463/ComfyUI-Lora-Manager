@@ -207,6 +207,9 @@
         },
         "pinned": {
             "title": "[TODO: Translate] Pinned as this model's version"
+        },
+        "separateCard": {
+            "title": "다른 버전과 분리된 개별 카드로 표시됨"
         }
     },
     "globalContextMenu": {
@@ -297,6 +300,10 @@
             "baseModelSearchPlaceholder": "베이스 모델 검색...",
             "modelTags": "태그",
             "modelTypes": "모델 유형",
+            "publishedDate": "Civitai 게시일",
+            "publishedDateTooltip": "Civitai 버전이 이 기간에 게시된 모델을 표시합니다. 이 필터가 설정된 동안 Civitai 게시일이 없는 모델은 숨겨집니다.",
+            "publishedFrom": "시작",
+            "publishedTo": "종료",
             "license": "라이선스",
             "noCreditRequired": "크레딧 표기 없음",
             "allowSellingGeneratedContent": "판매 허용",
@@ -1064,6 +1071,8 @@
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
             "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "splitVersions": "버전을 개별 카드로 분리",
+            "mergeVersions": "버전을 하나의 카드로 합치기",
             "promoteToNvme": "NVMe로 승격",
             "pinToNvme": "NVMe에 고정",
             "demoteFromNvme": "NVMe에서 강등",
@@ -2136,7 +2145,15 @@
                     "resumeModelUpdates": "이 모델 업데이트 재개",
                     "ignoreModelUpdates": "이 모델 업데이트 무시",
                     "viewLocalVersions": "로컬 버전 모두 보기",
-                    "viewLocalTooltip": "이 모델의 모든 로컬 버전을 메인 페이지에 표시"
+                    "viewLocalTooltip": "이 모델의 모든 로컬 버전을 메인 페이지에 표시",
+                    "ownCard": "개별 카드",
+                    "ownCardTooltip": "다른 버전과 묶지 않고 이 버전을 라이브러리에서 개별 카드로 표시합니다",
+                    "joinGroup": "그룹으로 되돌리기",
+                    "joinGroupTooltip": "이 버전을 모델의 그룹 카드에 다시 표시합니다",
+                    "splitAll": "개별 카드로 분리",
+                    "splitAllTooltip": "이 모델의 모든 로컬 버전을 라이브러리에서 개별 카드로 표시합니다",
+                    "mergeAll": "하나의 카드로 합치기",
+                    "mergeAllTooltip": "이 모델의 모든 로컬 버전을 다시 하나의 카드로 묶습니다"
                 },
                 "filters": {
                     "label": "기본 필터",
@@ -2680,7 +2697,10 @@
             "bulkTagsReplaceFailed": "모델의 태그 교체에 실패했습니다",
             "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
             "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
-            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}",
+            "versionsSplit": "이제 버전이 개별 카드로 표시됩니다",
+            "versionsMerged": "버전을 다시 하나의 카드로 묶었습니다",
+            "versionsSplitFailed": "카드 그룹 업데이트 실패: {message}"
         },
         "search": {
             "atLeastOneOption": "최소 하나의 검색 옵션을 선택해야 합니다"

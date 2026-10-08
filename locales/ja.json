@@ -207,6 +207,9 @@
         },
         "pinned": {
             "title": "[TODO: Translate] Pinned as this model's version"
+        },
+        "separateCard": {
+            "title": "他のバージョンとは別の個別カードとして表示"
         }
     },
     "globalContextMenu": {
@@ -297,6 +300,10 @@
             "baseModelSearchPlaceholder": "ベースモデルを検索...",
             "modelTags": "タグ",
             "modelTypes": "モデルタイプ",
+            "publishedDate": "Civitai公開日",
+            "publishedDateTooltip": "Civitaiのバージョンがこの期間に公開されたモデルを表示します。このフィルターが有効な間、Civitaiの公開日がないモデルは非表示になります。",
+            "publishedFrom": "開始",
+            "publishedTo": "終了",
             "license": "ライセンス",
             "noCreditRequired": "クレジット不要",
             "allowSellingGeneratedContent": "販売許可",
@@ -1064,6 +1071,8 @@
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
             "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "splitVersions": "バージョンを個別カードに分割",
+            "mergeVersions": "バージョンを1枚のカードにまとめる",
             "promoteToNvme": "NVMe に昇格",
             "pinToNvme": "NVMe に固定",
             "demoteFromNvme": "NVMe から降格",
@@ -2136,7 +2145,15 @@
                     "resumeModelUpdates": "このモデルの更新を再開",
                     "ignoreModelUpdates": "このモデルの更新を無視",
                     "viewLocalVersions": "ローカルの全バージョンを表示",
-                    "viewLocalTooltip": "このモデルのすべてのローカルバージョンをメインページで表示"
+                    "viewLocalTooltip": "このモデルのすべてのローカルバージョンをメインページで表示",
+                    "ownCard": "個別カード",
+                    "ownCardTooltip": "他のバージョンとまとめず、このバージョンをライブラリで個別カードとして表示します",
+                    "joinGroup": "グループに戻す",
+                    "joinGroupTooltip": "このバージョンをモデルのグループカードに戻します",
+                    "splitAll": "個別カードに分割",
+                    "splitAllTooltip": "このモデルのすべてのローカルバージョンをライブラリで個別カードとして表示します",
+                    "mergeAll": "1枚のカードにまとめる",
+                    "mergeAllTooltip": "このモデルのすべてのローカルバージョンを1枚のカードにまとめ直します"
                 },
                 "filters": {
                     "label": "ベースフィルター",
@@ -2680,7 +2697,10 @@
             "bulkTagsReplaceFailed": "モデルのタグ置換に失敗しました",
             "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
             "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
-            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}",
+            "versionsSplit": "バージョンを個別カードで表示しました",
+            "versionsMerged": "バージョンを1枚のカードにまとめました",
+            "versionsSplitFailed": "カードのグループ化を更新できませんでした: {message}"
         },
         "search": {
             "atLeastOneOption": "少なくとも1つの検索オプションを選択する必要があります"

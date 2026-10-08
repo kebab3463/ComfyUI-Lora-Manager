@@ -73,6 +73,7 @@ class PersistentModelCache:
         "pinned",
         "source_model_id",
         "source_version_id",
+        "separate_card",
     )
     _MODEL_UPDATE_COLUMNS: Tuple[str, ...] = _MODEL_COLUMNS[2:]
     _instances: Dict[str, "PersistentModelCache"] = {}
@@ -218,6 +219,7 @@ class PersistentModelCache:
                 "from_civitai": bool(row["from_civitai"]),
                 "favorite": bool(row["favorite"]),
                 "pinned": bool(row["pinned"]),
+                "separate_card": bool(row["separate_card"]),
                 "notes": row["notes"] or "",
                 "usage_tips": row["usage_tips"] or "",
                 "metadata_source": row["metadata_source"] or None,
@@ -677,6 +679,7 @@ class PersistentModelCache:
             "civitai_stats": "TEXT",
             "civitai_published_at": "TEXT",
             "pinned": "INTEGER",
+            "separate_card": "INTEGER",
         }
 
         for column, definition in required_columns.items():
@@ -774,6 +777,7 @@ class PersistentModelCache:
             1 if item.get("pinned") else 0,
             item.get("source_model_id") or "",
             item.get("source_version_id") or "",
+            1 if item.get("separate_card") else 0,
         )
 
     def _insert_model_sql(self) -> str:

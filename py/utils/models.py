@@ -91,6 +91,7 @@ class BaseModelMetadata:
     civitai_deleted: bool = False  # Whether deleted from Civitai
     favorite: bool = False  # Whether the model is a favorite
     pinned: bool = False  # Whether this version represents its model group
+    separate_card: bool = False  # Whether this version gets its own card instead of grouping
     exclude: bool = False  # Whether to exclude this model from the cache
     db_checked: bool = False  # Whether checked in archive DB
     skip_metadata_refresh: bool = (

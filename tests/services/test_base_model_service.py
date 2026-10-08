@@ -1703,3 +1703,161 @@ async def test_get_folder_tree_include_empty_uses_live_enumeration():
 
     assert default_tree == {"a": {"b": {}}}
     assert include_empty_tree == {"a": {"b": {}}, "empty": {}}
+
+
+@pytest.mark.asyncio
+async def test_separate_card_version_gets_its_own_card():
+    """A version marked separate leaves its group; the rest still group."""
+    items = [
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 100}},
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 200}, "separate_card": True},
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 300}},
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", group_by_model=True
+    )
+
+    ids = [item["civitai"]["id"] for item in response["items"]]
+    assert sorted(ids) == [200, 300]
+    grouped = next(i for i in response["items"] if i["civitai"]["id"] == 300)
+    separate = next(i for i in response["items"] if i["civitai"]["id"] == 200)
+    # The group only counts the versions still inside it.
+    assert grouped["version_count"] == 2
+    assert "version_count" not in separate
+
+
+@pytest.mark.asyncio
+async def test_splitting_every_version_shows_each_as_a_card():
+    items = [
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": vid}, "separate_card": True}
+        for vid in (100, 200, 300)
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", group_by_model=True
+    )
+
+    assert response["total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_grouping_keeps_ungrouped_cards_in_sort_order():
+    """Separate and ungroupable cards keep their sorted position instead of
+    being appended after every grouped card."""
+    items = [
+        {"model_name": "A", "folder": "r", "civitai": {"modelId": 1, "id": 10}},
+        {"model_name": "B", "folder": "r", "civitai": {"modelId": 1, "id": 20}, "separate_card": True},
+        {"model_name": "C", "folder": "r"},
+        {"model_name": "D", "folder": "r", "civitai": {"modelId": 1, "id": 30}},
+        {"model_name": "E", "folder": "r", "civitai": {"modelId": 2, "id": 40}},
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", group_by_model=True
+    )
+
+    # modelId 1's card sits where its first version sorted (A), represented
+    # by its newest grouped version (D).
+    assert [i["model_name"] for i in response["items"]] == ["D", "B", "C", "E"]
+
+
+@pytest.mark.asyncio
+async def test_separate_card_has_no_effect_when_grouping_is_off():
+    items = [
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 100}, "separate_card": True},
+        {"model_name": "M", "folder": "r", "civitai": {"modelId": 1, "id": 200}},
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc"
+    )
+
+    assert response["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_find_model_versions_ignores_base_model_subgrouping():
+    raw = [
+        {"file_path": "/a", "base_model": "SDXL", "civitai": {"modelId": 1, "id": 1}},
+        {"file_path": "/b", "base_model": "SD1.5", "civitai": {"modelId": 1, "id": 2}},
+        {"file_path": "/d", "base_model": "SDXL", "civitai": {"modelId": 2, "id": 4}},
+        {"file_path": "/solo"},
+    ]
+    service = _sibling_service(raw, {"version_grouping": "same_base"})
+
+    paths = {i["file_path"] for i in await service.find_model_versions("/a")}
+
+    assert paths == {"/a", "/b"}
+    assert await service.find_model_versions("/solo") == []
+    assert await service.find_model_versions("/missing") == []
+
+
+def _dated(name, model_id, version_id, published):
+    civitai = {"modelId": model_id, "id": version_id}
+    if published is not None:
+        civitai["publishedAt"] = published
+    return {"model_name": name, "folder": "r", "civitai": civitai}
+
+
+@pytest.mark.asyncio
+async def test_published_date_filter_is_inclusive_and_drops_undated():
+    items = [
+        _dated("before", 1, 1, "2024-02-29T23:59:59.000Z"),
+        _dated("first-day", 2, 2, "2024-03-01T00:00:00.000Z"),
+        _dated("last-day", 3, 3, "2024-03-31T23:59:59.000Z"),
+        _dated("after", 4, 4, "2024-04-01T00:00:00.000Z"),
+        _dated("undated", 5, 5, None),
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1,
+        page_size=10,
+        sort_by="name:asc",
+        published_from="2024-03-01",
+        published_to="2024-03-31",
+    )
+
+    assert [i["model_name"] for i in response["items"]] == ["first-day", "last-day"]
+
+
+@pytest.mark.asyncio
+async def test_published_date_filter_accepts_a_single_bound():
+    items = [
+        _dated("old", 1, 1, "2023-01-01T00:00:00Z"),
+        _dated("new", 2, 2, "2025-01-01T00:00:00Z"),
+    ]
+    service = _pin_service(items)
+
+    since = await service.get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", published_from="2024-01-01"
+    )
+    until = await service.get_paginated_data(
+        page=1, page_size=10, sort_by="name:asc", published_to="2024-01-01"
+    )
+
+    assert [i["model_name"] for i in since["items"]] == ["new"]
+    assert [i["model_name"] for i in until["items"]] == ["old"]
+
+
+@pytest.mark.asyncio
+async def test_published_date_filter_runs_before_grouping():
+    """A model whose latest version is out of range still shows, represented
+    by its newest version inside the range, and only in-range versions count."""
+    items = [
+        _dated("v1", 1, 100, "2024-01-10T00:00:00Z"),
+        _dated("v2", 1, 200, "2024-02-10T00:00:00Z"),
+        _dated("v3", 1, 300, "2025-06-10T00:00:00Z"),
+    ]
+
+    response = await _pin_service(items).get_paginated_data(
+        page=1,
+        page_size=10,
+        sort_by="name:asc",
+        group_by_model=True,
+        published_to="2024-12-31",
+    )
+
+    assert response["total"] == 1
+    assert response["items"][0]["civitai"]["id"] == 200
+    assert response["items"][0]["version_count"] == 2

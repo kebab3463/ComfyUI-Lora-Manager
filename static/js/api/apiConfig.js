@@ -84,6 +84,7 @@ export function getApiEndpoints(modelType) {
         moveModel: `/api/lm/${modelType}/move_model`,
         moveBulk: `/api/lm/${modelType}/move_models_bulk`,
         pinVersion: `/api/lm/${modelType}/pin-version`,
+        separateCard: `/api/lm/${modelType}/separate-card`,
         createFolder: `/api/lm/${modelType}/create-folder`,
         deleteFolder: `/api/lm/${modelType}/delete-folder`,
         renameFolder: `/api/lm/${modelType}/rename-folder`,

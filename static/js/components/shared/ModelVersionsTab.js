@@ -1,4 +1,4 @@
-import { getModelApiClient } from '../../api/modelApiFactory.js';
+import { getModelApiClient, resetAndReload } from '../../api/modelApiFactory.js';
 import { downloadManager } from '../../managers/DownloadManager.js';
 import { modalManager } from '../../managers/ModalManager.js';
 import { openCivitaiUrl, showToast } from '../../utils/uiHelpers.js';
@@ -513,7 +513,7 @@ function renderDeletePreview(version, versionName) {
 }
 
 function renderRow(version, options) {
-    const { latestLibraryVersionId, currentVersionId, modelId: parentModelId } = options;
+    const { latestLibraryVersionId, currentVersionId, modelId: parentModelId, canSplit } = options;
     const isCurrent = currentVersionId && version.versionId === currentVersionId;
     const isNewer =
         typeof latestLibraryVersionId === 'number' &&
@@ -733,6 +733,29 @@ function renderRow(version, options) {
             }
         ));
     }
+    if (canSplit && version.isInLibrary && version.filePath) {
+        actions.push(buildActionButton(
+            version.separateCard
+                ? translate('modals.model.versions.actions.joinGroup', {}, 'Rejoin Group')
+                : translate('modals.model.versions.actions.ownCard', {}, 'Own Card'),
+            'version-action-ghost',
+            'toggle-separate',
+            {
+                title: version.separateCard
+                    ? translate(
+                        'modals.model.versions.actions.joinGroupTooltip',
+                        {},
+                        'Show this version on the model\'s grouped card again'
+                    )
+                    : translate(
+                        'modals.model.versions.actions.ownCardTooltip',
+                        {},
+                        'Show this version as its own card in the library instead of grouping it with the other versions'
+                    ),
+                extraAttributes: `data-separate-state="${version.separateCard ? 'separate' : 'grouped'}"`,
+            }
+        ));
+    }
     actions.push(buildActionButton(
         ignoreLabel,
         'version-action-ghost',
@@ -837,6 +860,10 @@ function setupMediaHoverInteractions(container) {
     });
 }
 
+function getLocalVersions(record) {
+    return (record?.versions || []).filter(version => version.isInLibrary && version.filePath);
+}
+
 function getLatestLibraryVersionId(record) {
     if (!record || !Array.isArray(record.inLibraryVersionIds) || !record.inLibraryVersionIds.length) {
         return null;
@@ -861,6 +888,16 @@ function renderToolbar(record, toolbarState = {}) {
     const toggleTooltip = getToggleTooltipText(displayMode);
     const filterActive = toolbarState.isFilteringActive ? 'true' : 'false';
     const screenReaderText = [toggleLabel, toggleState].filter(Boolean).join(': ');
+    const splitButton = toolbarState.canSplit
+        ? `
+                <button class="versions-toolbar-btn versions-toolbar-btn-secondary" data-versions-action="split-all" title="${escapeHtml(toolbarState.allSeparate
+                    ? translate('modals.model.versions.actions.mergeAllTooltip', {}, 'Group every local version of this model back onto one card')
+                    : translate('modals.model.versions.actions.splitAllTooltip', {}, 'Show every local version of this model as its own card in the library'))}">
+                    ${escapeHtml(toolbarState.allSeparate
+                        ? translate('modals.model.versions.actions.mergeAll', {}, 'Merge into one card')
+                        : translate('modals.model.versions.actions.splitAll', {}, 'Split into separate cards'))}
+                </button>`
+        : '';
 
     return `
         <header class="versions-toolbar">
@@ -880,7 +917,7 @@ function renderToolbar(record, toolbarState = {}) {
                 </button>
                 <button class="versions-toolbar-btn versions-toolbar-btn-secondary" data-versions-action="view-local" title="${escapeHtml(translate('modals.model.versions.actions.viewLocalTooltip', {}, 'Show all local versions of this model on the main page'))}">
                     ${escapeHtml(viewLocalText)}
-                </button>
+                </button>${splitButton}
             </div>
         </header>
     `;
@@ -1000,6 +1037,11 @@ export function initVersionsTab({
             (a, b) => Number(b.versionId) - Number(a.versionId)
         );
 
+        // Splitting only means something with two or more local versions.
+        const localVersions = getLocalVersions(record);
+        const canSplit = localVersions.length > 1;
+        const allSeparate = canSplit && localVersions.every(version => version.separateCard);
+
         const filteredVersions = sortedVersions.filter(version => {
             if (!isFilteringActive) {
                 return true;
@@ -1042,6 +1084,7 @@ export function initVersionsTab({
                     latestLibraryVersionId: dividerThresholdVersionId,
                     currentVersionId: normalizedCurrentVersionId,
                     modelId: record?.modelId ?? modelId,
+                    canSplit,
                 });
                 return markup;
             })
@@ -1054,6 +1097,8 @@ export function initVersionsTab({
         ${renderToolbar(record, {
             displayMode,
             isFilteringActive,
+            canSplit,
+            allSeparate,
         })}
         <div class="versions-list">
             ${listContent}
@@ -1206,6 +1251,53 @@ export function initVersionsTab({
                 modelType
             );
         }
+    }
+
+    // Saves the card grouping, then reloads both this tab (for the new state)
+    // and the library grid (where the cards actually change).
+    async function applySeparateCard(button, filePath, separate, allVersions) {
+        button.disabled = true;
+        try {
+            await ensureClient().setSeparateCard(filePath, separate, { allVersions });
+            showToast(
+                separate ? 'toast.models.versionsSplit' : 'toast.models.versionsMerged',
+                {},
+                'success'
+            );
+            await refresh();
+            // The modal can also open from pages without this model's grid.
+            if (state.currentPageType === modelType) {
+                await resetAndReload(false);
+            }
+        } catch (error) {
+            console.error('Failed to update card grouping:', error);
+            showToast(
+                'toast.models.versionsSplitFailed',
+                { message: error?.message ?? 'Unknown error' },
+                'error'
+            );
+        } finally {
+            if (document.body.contains(button)) {
+                button.disabled = false;
+            }
+        }
+    }
+
+    async function handleToggleSeparate(button, versionId) {
+        const version = controller.record?.versions.find(v => v.versionId === versionId);
+        if (!version?.filePath) {
+            return;
+        }
+        await applySeparateCard(button, version.filePath, !version.separateCard, false);
+    }
+
+    async function handleSplitAll(button) {
+        const localVersions = getLocalVersions(controller.record);
+        if (localVersions.length < 2) {
+            return;
+        }
+        const allSeparate = localVersions.every(version => version.separateCard);
+        await applySeparateCard(button, localVersions[0].filePath, !allSeparate, true);
     }
 
     async function handleToggleVersionIgnore(button, versionId) {
@@ -1614,6 +1706,10 @@ export function initVersionsTab({
                     event.preventDefault();
                     handleViewLocalVersions();
                     break;
+                case 'split-all':
+                    event.preventDefault();
+                    await handleSplitAll(toolbarAction);
+                    break;
                 default:
                     break;
             }
@@ -1646,6 +1742,10 @@ export function initVersionsTab({
                 case 'toggle-ignore':
                     event.preventDefault();
                     await handleToggleVersionIgnore(actionButton, versionId);
+                    break;
+                case 'toggle-separate':
+                    event.preventDefault();
+                    await handleToggleSeparate(actionButton, versionId);
                     break;
                 default:
                     break;

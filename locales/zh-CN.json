@@ -207,6 +207,9 @@
         },
         "pinned": {
             "title": "[TODO: Translate] Pinned as this model's version"
+        },
+        "separateCard": {
+            "title": "作为独立卡片显示，与其他版本分开"
         }
     },
     "globalContextMenu": {
@@ -297,6 +300,10 @@
             "baseModelSearchPlaceholder": "搜索基础模型...",
             "modelTags": "标签",
             "modelTypes": "模型类型",
+            "publishedDate": "Civitai 发布日期",
+            "publishedDateTooltip": "显示 Civitai 版本在此日期范围内发布的模型。启用此筛选时，没有 Civitai 发布日期的模型将被隐藏。",
+            "publishedFrom": "从",
+            "publishedTo": "至",
             "license": "许可证",
             "noCreditRequired": "无需署名",
             "allowSellingGeneratedContent": "允许销售",
@@ -1064,6 +1071,8 @@
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
             "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "splitVersions": "将版本拆分为独立卡片",
+            "mergeVersions": "将版本合并为一张卡片",
             "promoteToNvme": "提升到 NVMe",
             "pinToNvme": "固定到 NVMe",
             "demoteFromNvme": "从 NVMe 降级",
@@ -2136,7 +2145,15 @@
                     "resumeModelUpdates": "继续跟踪该模型的更新",
                     "ignoreModelUpdates": "忽略该模型的更新",
                     "viewLocalVersions": "查看所有本地版本",
-                    "viewLocalTooltip": "在主页面上显示该模型的所有本地版本"
+                    "viewLocalTooltip": "在主页面上显示该模型的所有本地版本",
+                    "ownCard": "独立卡片",
+                    "ownCardTooltip": "在库中将此版本显示为独立卡片，而不是与其他版本分组",
+                    "joinGroup": "重新分组",
+                    "joinGroupTooltip": "重新在模型的分组卡片中显示此版本",
+                    "splitAll": "拆分为独立卡片",
+                    "splitAllTooltip": "在库中将此模型的每个本地版本显示为独立卡片",
+                    "mergeAll": "合并为一张卡片",
+                    "mergeAllTooltip": "将此模型的所有本地版本重新合并到一张卡片"
                 },
                 "filters": {
                     "label": "基础筛选",
@@ -2680,7 +2697,10 @@
             "bulkTagsReplaceFailed": "批量替换标签失败",
             "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
             "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
-            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}",
+            "versionsSplit": "版本现已显示为独立卡片",
+            "versionsMerged": "版本已重新合并为一张卡片",
+            "versionsSplitFailed": "更新卡片分组失败：{message}"
         },
         "search": {
             "atLeastOneOption": "至少选择一个搜索选项"

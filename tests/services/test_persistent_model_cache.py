@@ -694,3 +694,46 @@ def test_pinned_column_is_added_to_legacy_databases(tmp_path: Path, monkeypatch)
     assert persisted is not None
     entry = next(e for e in persisted.raw_data if e['file_path'] == file_path)
     assert entry['pinned'] is True
+
+
+def test_separate_card_flag_roundtrip(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    store = PersistentModelCache(db_path=str(tmp_path / 'cache.sqlite'))
+
+    separate_path = (tmp_path / 'separate.safetensors').as_posix()
+    plain_path = (tmp_path / 'plain.safetensors').as_posix()
+
+    separate_item = _stats_item(separate_path, None)
+    separate_item['separate_card'] = True
+    store.update_single_model('lora', separate_item)
+    store.update_single_model('lora', _stats_item(plain_path, None))
+
+    persisted = store.load_cache('lora')
+    assert persisted is not None
+    by_path = {entry['file_path']: entry for entry in persisted.raw_data}
+    assert by_path[separate_path]['separate_card'] is True
+    assert by_path[plain_path]['separate_card'] is False
+
+
+def test_separate_card_column_is_added_to_legacy_databases(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+
+    monkeypatch.setenv('LORA_MANAGER_DISABLE_PERSISTENT_CACHE', '0')
+    db_path = tmp_path / 'legacy_separate.sqlite'
+
+    legacy_columns = [c for c in PersistentModelCache._MODEL_COLUMNS if c != 'separate_card']
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        'CREATE TABLE models ({}, PRIMARY KEY (model_type, file_path))'.format(
+            ', '.join(f'{name} TEXT' for name in legacy_columns)
+        )
+    )
+    conn.commit()
+    conn.close()
+
+    PersistentModelCache(db_path=str(db_path))
+
+    conn = sqlite3.connect(str(db_path))
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(models)')}
+    conn.close()
+    assert 'separate_card' in columns

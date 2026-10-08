@@ -563,6 +563,7 @@ export function createModelCard(model, modelType) {
     card.dataset.base_model = model.base_model || 'Unknown';
     card.dataset.favorite = model.favorite ? 'true' : 'false';
     card.dataset.pinned = model.pinned ? 'true' : 'false';
+    card.dataset.separate_card = model.separate_card ? 'true' : 'false';
     card.dataset.exclude = model.exclude ? 'true' : 'false';
     const modelSourceInfo = getModelSourceInfo(model);
     card.dataset.source_url = modelSourceInfo?.url || '';
@@ -839,6 +840,7 @@ export function createModelCard(model, modelType) {
                         ${downloadCount !== null ? `<span class="civitai-stat civitai-stat--downloads" title="${translate('modelCard.stats.downloads', {}, 'Civitai downloads')}"><i class="fas fa-download"></i>${formatStatCount(downloadCount)}</span>` : ''}
                         ${uploadAge !== null ? `<span class="civitai-stat civitai-stat--uploaded" title="${translate('modelCard.uploaded.title', {}, 'Uploaded to Civitai')}"><i class="fas fa-clock"></i>${uploadAge}</span>` : ''}
                         ${model.pinned ? `<span class="civitai-stat civitai-stat--pinned" title="${translate('modelCard.pinned.title', {}, 'Pinned version for this model')}"><i class="fas fa-thumbtack"></i></span>` : ''}
+                        ${model.separate_card && state.global.settings.group_by_model ? `<span class="civitai-stat civitai-stat--separate" title="${translate('modelCard.separateCard.title', {}, 'Shown as its own card, separate from its other versions')}"><i class="fas fa-clone"></i></span>` : ''}
                     </div>
                 </div>
                 <div class="card-actions">

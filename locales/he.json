@@ -207,6 +207,9 @@
         },
         "pinned": {
             "title": "[TODO: Translate] Pinned as this model's version"
+        },
+        "separateCard": {
+            "title": "מוצג ככרטיס נפרד, בנפרד משאר הגרסאות"
         }
     },
     "globalContextMenu": {
@@ -297,6 +300,10 @@
             "baseModelSearchPlaceholder": "חפש מודלי בסיס...",
             "modelTags": "תגיות",
             "modelTypes": "סוגי מודלים",
+            "publishedDate": "פורסם ב-Civitai",
+            "publishedDateTooltip": "הצג מודלים שגרסת ה-Civitai שלהם פורסמה בטווח התאריכים הזה. מודלים ללא תאריך פרסום ב-Civitai מוסתרים כל עוד המסנן פעיל.",
+            "publishedFrom": "מתאריך",
+            "publishedTo": "עד תאריך",
             "license": "רישיון",
             "noCreditRequired": "ללא קרדיט נדרש",
             "allowSellingGeneratedContent": "אפשר מכירה",
@@ -1064,6 +1071,8 @@
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
             "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "splitVersions": "פצל גרסאות לכרטיסים נפרדים",
+            "mergeVersions": "אחד גרסאות לכרטיס אחד",
             "promoteToNvme": "קידום ל-NVMe",
             "pinToNvme": "הצמדה ל-NVMe",
             "demoteFromNvme": "הורדה מ-NVMe",
@@ -2136,7 +2145,15 @@
                     "resumeModelUpdates": "המשך עדכונים עבור מודל זה",
                     "ignoreModelUpdates": "התעלם מעדכונים עבור מודל זה",
                     "viewLocalVersions": "הצג את כל הגרסאות המקומיות",
-                    "viewLocalTooltip": "הצג את כל הגרסאות המקומיות של המודל הזה בדף הראשי"
+                    "viewLocalTooltip": "הצג את כל הגרסאות המקומיות של המודל הזה בדף הראשי",
+                    "ownCard": "כרטיס נפרד",
+                    "ownCardTooltip": "הצג גרסה זו ככרטיס נפרד בספרייה במקום לקבץ אותה עם שאר הגרסאות",
+                    "joinGroup": "החזר לקבוצה",
+                    "joinGroupTooltip": "הצג שוב גרסה זו בכרטיס המקובץ של המודל",
+                    "splitAll": "פצל לכרטיסים נפרדים",
+                    "splitAllTooltip": "הצג כל גרסה מקומית של מודל זה ככרטיס נפרד בספרייה",
+                    "mergeAll": "אחד לכרטיס אחד",
+                    "mergeAllTooltip": "קבץ שוב את כל הגרסאות המקומיות של מודל זה לכרטיס אחד"
                 },
                 "filters": {
                     "label": "מסנן בסיס",
@@ -2680,7 +2697,10 @@
             "bulkTagsReplaceFailed": "החלפת תגיות למודלים נכשלה",
             "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
             "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
-            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}",
+            "versionsSplit": "הגרסאות מוצגות כעת ככרטיסים נפרדים",
+            "versionsMerged": "הגרסאות קובצו שוב לכרטיס אחד",
+            "versionsSplitFailed": "עדכון קיבוץ הכרטיסים נכשל: {message}"
         },
         "search": {
             "atLeastOneOption": "יש לבחור לפחות אפשרות חיפוש אחת"

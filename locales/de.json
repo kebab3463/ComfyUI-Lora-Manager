@@ -207,6 +207,9 @@
         },
         "pinned": {
             "title": "[TODO: Translate] Pinned as this model's version"
+        },
+        "separateCard": {
+            "title": "Als eigene Karte angezeigt, getrennt von den anderen Versionen"
         }
     },
     "globalContextMenu": {
@@ -297,6 +300,10 @@
             "baseModelSearchPlaceholder": "Basismodelle durchsuchen...",
             "modelTags": "Tags",
             "modelTypes": "Modelltypen",
+            "publishedDate": "Auf Civitai veröffentlicht",
+            "publishedDateTooltip": "Zeigt Modelle, deren Civitai-Version in diesem Zeitraum veröffentlicht wurde. Modelle ohne Civitai-Veröffentlichungsdatum werden ausgeblendet, solange dieser Filter aktiv ist.",
+            "publishedFrom": "Von",
+            "publishedTo": "Bis",
             "license": "Lizenz",
             "noCreditRequired": "Kein Credit erforderlich",
             "allowSellingGeneratedContent": "Verkauf erlaubt",
@@ -1064,6 +1071,8 @@
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
             "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "splitVersions": "Versionen in eigene Karten aufteilen",
+            "mergeVersions": "Versionen in einer Karte zusammenführen",
             "promoteToNvme": "Auf NVMe übertragen",
             "pinToNvme": "Auf NVMe anheften",
             "demoteFromNvme": "Von NVMe entfernen",
@@ -2136,7 +2145,15 @@
                     "resumeModelUpdates": "Aktualisierungen für dieses Modell fortsetzen",
                     "ignoreModelUpdates": "Aktualisierungen für dieses Modell ignorieren",
                     "viewLocalVersions": "Alle lokalen Versionen anzeigen",
-                    "viewLocalTooltip": "Alle lokalen Versionen dieses Modells auf der Hauptseite anzeigen"
+                    "viewLocalTooltip": "Alle lokalen Versionen dieses Modells auf der Hauptseite anzeigen",
+                    "ownCard": "Eigene Karte",
+                    "ownCardTooltip": "Diese Version als eigene Karte in der Bibliothek anzeigen, statt sie mit den anderen Versionen zu gruppieren",
+                    "joinGroup": "Wieder gruppieren",
+                    "joinGroupTooltip": "Diese Version wieder auf der gruppierten Karte des Modells anzeigen",
+                    "splitAll": "In eigene Karten aufteilen",
+                    "splitAllTooltip": "Jede lokale Version dieses Modells als eigene Karte in der Bibliothek anzeigen",
+                    "mergeAll": "In einer Karte zusammenführen",
+                    "mergeAllTooltip": "Alle lokalen Versionen dieses Modells wieder auf einer Karte gruppieren"
                 },
                 "filters": {
                     "label": "Basisfilter",
@@ -2680,7 +2697,10 @@
             "bulkTagsReplaceFailed": "Fehler beim Ersetzen von Tags für Modelle",
             "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
             "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
-            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}",
+            "versionsSplit": "Versionen werden jetzt als eigene Karten angezeigt",
+            "versionsMerged": "Versionen wieder in einer Karte gruppiert",
+            "versionsSplitFailed": "Kartengruppierung konnte nicht aktualisiert werden: {message}"
         },
         "search": {
             "atLeastOneOption": "Mindestens eine Suchoption muss ausgewählt werden"

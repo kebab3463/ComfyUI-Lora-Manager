@@ -125,6 +125,16 @@ class BaseModelService(ABC):
                 reverse=True,
             )
 
+        # Civitai publish-date range. Applied before grouping so each card is
+        # represented by its newest version inside the range, rather than
+        # dropping a model whose latest version happens to fall outside it.
+        published_from = kwargs.get("published_from")
+        published_to = kwargs.get("published_to")
+        if published_from or published_to:
+            sorted_data = self._apply_published_date_filter(
+                sorted_data, published_from, published_to
+            )
+
         # Optionally group by civitai modelId, showing one version per model:
         # the pinned one when the user has chosen it, else the latest.
         dedup_lost = 0
@@ -139,13 +149,19 @@ class BaseModelService(ABC):
 
             dedup_map = {}  # (modelId [,base_model]) -> (item, rank)
             version_counter = {}  # same-key -> count
-            standalone = []
+            # Output slots in sort order: a group key (filled with its
+            # representative below) or an ungrouped item, so ungrouped cards
+            # keep their sorted position instead of trailing the grouped ones.
+            slots: List[Any] = []
             for item in sorted_data:
                 mid = self._extract_group_key(item)
-                if mid is None:
-                    standalone.append(item)
+                # A version marked as its own card never joins its group.
+                if mid is None or item.get("separate_card"):
+                    slots.append(item)
                     continue
                 key = (mid, item.get("base_model") or "") if group_by_base else mid
+                if key not in version_counter:
+                    slots.append(key)
                 # Count all versions per key
                 version_counter[key] = version_counter.get(key, 0) + 1
                 # Prefer CivitAI version_id; fall back to modified timestamp
@@ -163,8 +179,11 @@ class BaseModelService(ABC):
                 item = dict(item)
                 item["version_count"] = version_counter[key]
                 dedup_map[key] = (item, rank)
-            dedup_lost = len(sorted_data) - (len(dedup_map) + len(standalone))
-            sorted_data = [entry[0] for entry in dedup_map.values()] + standalone
+            dedup_lost = len(sorted_data) - len(slots)
+            sorted_data = [
+                slot if isinstance(slot, dict) else dedup_map[slot][0]
+                for slot in slots
+            ]
 
         # Re-sort by version_count (grouped: after dedup; non-grouped: group internally, sort, expand)
         if sort_params.key == "versions_count" and civitai_model_id is None:
@@ -531,6 +550,34 @@ class BaseModelService(ABC):
             data, search, normalized_options, fuzzy_search
         )
 
+    @staticmethod
+    def _apply_published_date_filter(
+        data: List[Dict[str, Any]],
+        published_from: Optional[str],
+        published_to: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Keep items whose Civitai publish date falls in an inclusive day range.
+
+        Bounds are ``YYYY-MM-DD`` strings; either may be omitted. Comparing the
+        date prefix of the ISO timestamp makes both bounds whole-day inclusive.
+        Items without a publish date cannot satisfy a range and are dropped.
+        """
+        filtered = []
+        for item in data:
+            civitai = item.get("civitai")
+            raw = None
+            if isinstance(civitai, dict):
+                raw = civitai.get("publishedAt") or civitai.get("createdAt")
+            if not isinstance(raw, str) or len(raw) < 10:
+                continue
+            day = raw[:10]
+            if published_from and day < published_from:
+                continue
+            if published_to and day > published_to:
+                continue
+            filtered.append(item)
+        return filtered
+
     async def _apply_specific_filters(self, data: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
         """Apply model-specific filters - to be overridden by subclasses if needed"""
         return data
@@ -797,6 +844,28 @@ class BaseModelService(ABC):
             for item in cache.raw_data
             if self._extract_group_key(item) == group_key
             and (not group_by_base or (item.get("base_model") or "") == target_base)
+        ]
+
+    async def find_model_versions(self, file_path: str) -> List[Dict[str, Any]]:
+        """Return every cached version of *file_path*'s model, itself included.
+
+        Unlike :meth:`find_group_siblings` this ignores base-model subgrouping:
+        "split all versions" means every local version of the model, including
+        ones that currently sit on a different base model's card. Returns an
+        empty list when the model is unknown or has no group identity.
+        """
+        cache = await self.scanner.get_cached_data()
+        target = next(
+            (item for item in cache.raw_data if item.get("file_path") == file_path),
+            None,
+        )
+        if target is None:
+            return []
+        group_key = self._extract_group_key(target)
+        if group_key is None:
+            return []
+        return [
+            item for item in cache.raw_data if self._extract_group_key(item) == group_key
         ]
 
     @staticmethod

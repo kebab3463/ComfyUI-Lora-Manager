@@ -207,6 +207,9 @@
         },
         "pinned": {
             "title": "[TODO: Translate] Pinned as this model's version"
+        },
+        "separateCard": {
+            "title": "Se muestra como tarjeta propia, separada de sus otras versiones"
         }
     },
     "globalContextMenu": {
@@ -297,6 +300,10 @@
             "baseModelSearchPlaceholder": "Buscar modelos base...",
             "modelTags": "Etiquetas",
             "modelTypes": "Tipos de modelos",
+            "publishedDate": "Publicado en Civitai",
+            "publishedDateTooltip": "Muestra los modelos cuya versión de Civitai se publicó en este rango de fechas. Los modelos sin fecha de publicación en Civitai se ocultan mientras este filtro está activo.",
+            "publishedFrom": "Desde",
+            "publishedTo": "Hasta",
             "license": "Licencia",
             "noCreditRequired": "Sin crédito requerido",
             "allowSellingGeneratedContent": "Venta permitida",
@@ -1064,6 +1071,8 @@
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
             "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "splitVersions": "Separar versiones en tarjetas propias",
+            "mergeVersions": "Unir versiones en una tarjeta",
             "promoteToNvme": "Promover a NVMe",
             "pinToNvme": "Fijar en NVMe",
             "demoteFromNvme": "Retirar de NVMe",
@@ -2136,7 +2145,15 @@
                     "resumeModelUpdates": "Reanudar actualizaciones para este modelo",
                     "ignoreModelUpdates": "Ignorar actualizaciones para este modelo",
                     "viewLocalVersions": "Ver todas las versiones locales",
-                    "viewLocalTooltip": "Mostrar todas las versiones locales de este modelo en la página principal"
+                    "viewLocalTooltip": "Mostrar todas las versiones locales de este modelo en la página principal",
+                    "ownCard": "Tarjeta propia",
+                    "ownCardTooltip": "Mostrar esta versión como tarjeta propia en la biblioteca en lugar de agruparla con las demás versiones",
+                    "joinGroup": "Volver al grupo",
+                    "joinGroupTooltip": "Mostrar de nuevo esta versión en la tarjeta agrupada del modelo",
+                    "splitAll": "Separar en tarjetas propias",
+                    "splitAllTooltip": "Mostrar cada versión local de este modelo como tarjeta propia en la biblioteca",
+                    "mergeAll": "Unir en una tarjeta",
+                    "mergeAllTooltip": "Volver a agrupar todas las versiones locales de este modelo en una tarjeta"
                 },
                 "filters": {
                     "label": "Filtro base",
@@ -2680,7 +2697,10 @@
             "bulkTagsReplaceFailed": "Error al reemplazar etiquetas para los modelos",
             "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
             "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
-            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}",
+            "versionsSplit": "Las versiones ahora se muestran como tarjetas separadas",
+            "versionsMerged": "Versiones agrupadas de nuevo en una tarjeta",
+            "versionsSplitFailed": "No se pudo actualizar la agrupación de tarjetas: {message}"
         },
         "search": {
             "atLeastOneOption": "Al menos una opción de búsqueda debe estar seleccionada"
