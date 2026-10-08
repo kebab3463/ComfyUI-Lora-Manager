@@ -6,15 +6,17 @@ import subprocess
 import zipfile
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 from aiohttp import web
 
 from py.services.model_hash_index import ModelHashIndex
+from py.routes.handlers import misc_handlers
 from py.routes.handlers.misc_handlers import (
     BackupHandler,
     DoctorHandler,
+    MiscHandlerSet,
     FileSystemHandler,
     HealthCheckHandler,
     LoraCodeHandler,
@@ -207,6 +209,108 @@ async def test_doctor_handler_reports_key_cache_and_ui_issues():
     assert diagnostic_map["civitai_api_key"]["status"] == "warning"
     assert diagnostic_map["cache_health"]["status"] == "error"
     assert diagnostic_map["ui_version"]["status"] == "warning"
+
+
+@pytest.mark.asyncio
+async def test_doctor_handler_flags_orphaned_centralized_sidecars(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def civitai_factory():
+        return DummyCivitaiClient()
+
+    handler = DoctorHandler(
+        settings_service=DummySettings({"civitai_api_key": "token"}),
+        civitai_client_factory=civitai_factory,
+        scanner_factories=(),
+    )
+    monkeypatch.setattr(misc_handlers, "get_storage_mode", lambda: "centralized")
+    monkeypatch.setattr(
+        misc_handlers,
+        "get_unmatched_sidecar_components",
+        lambda: [
+            {
+                "component": "loras-abc12345",
+                "basename": "loras",
+                "last_path": "/mnt/old/loras",
+            },
+            {"component": "loras-def67890", "basename": "loras", "last_path": ""},
+        ],
+    )
+
+    response = await handler.get_doctor_diagnostics(
+        FakeRequest(method="GET")  # pyright: ignore[reportArgumentType]
+    )
+    payload = _json_payload(response)
+    item = {entry["id"]: entry for entry in payload["diagnostics"]}[
+        "sidecar_mirror_orphans"
+    ]
+
+    assert item["status"] == "warning"
+    assert "2 sidecar directories" in item["summary"]
+    assert any("/mnt/old/loras" in line for line in item["details"])
+    assert any("unknown" in line for line in item["details"])
+
+
+@pytest.mark.asyncio
+async def test_doctor_handler_sidecar_check_ok_when_all_linked(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def civitai_factory():
+        return DummyCivitaiClient()
+
+    handler = DoctorHandler(
+        settings_service=DummySettings({"civitai_api_key": "token"}),
+        civitai_client_factory=civitai_factory,
+        scanner_factories=(),
+    )
+    monkeypatch.setattr(misc_handlers, "get_storage_mode", lambda: "centralized")
+    monkeypatch.setattr(misc_handlers, "get_unmatched_sidecar_components", lambda: [])
+    monkeypatch.setattr(
+        misc_handlers, "describe_sidecar_root", lambda: {"root": "/sidecars"}
+    )
+
+    response = await handler.get_doctor_diagnostics(
+        FakeRequest(method="GET")  # pyright: ignore[reportArgumentType]
+    )
+    payload = _json_payload(response)
+    item = {entry["id"]: entry for entry in payload["diagnostics"]}[
+        "sidecar_mirror_orphans"
+    ]
+
+    assert item["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_doctor_handler_sidecar_check_skipped_alongside(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def civitai_factory():
+        return DummyCivitaiClient()
+
+    handler = DoctorHandler(
+        settings_service=DummySettings({"civitai_api_key": "token"}),
+        civitai_client_factory=civitai_factory,
+        scanner_factories=(),
+    )
+    monkeypatch.setattr(misc_handlers, "get_storage_mode", lambda: "alongside")
+
+    def _unexpected():
+        raise AssertionError("orphan lookup must not run in alongside mode")
+
+    monkeypatch.setattr(
+        misc_handlers, "get_unmatched_sidecar_components", _unexpected
+    )
+
+    response = await handler.get_doctor_diagnostics(
+        FakeRequest(method="GET")  # pyright: ignore[reportArgumentType]
+    )
+    payload = _json_payload(response)
+    item = {entry["id"]: entry for entry in payload["diagnostics"]}[
+        "sidecar_mirror_orphans"
+    ]
+
+    assert item["status"] == "ok"
+    assert "alongside" in item["summary"]
 
 
 @pytest.mark.asyncio
@@ -2762,3 +2866,66 @@ async def test_sidecar_migration_handler_relocate_root_requires_old_root():
     assert response.status == 400
     assert "old_root" in payload["error"]
     assert use_case.calls == []
+
+
+# --- Global price alerts panel endpoint -------------------------------------
+
+
+class _AnyHandler:
+    def __getattr__(self, _name):
+        return lambda request: None
+
+
+def _stub_misc_handler_set(**overrides) -> MiscHandlerSet:
+    names = (
+        "health",
+        "settings",
+        "usage_stats",
+        "lora_code",
+        "trained_words",
+        "model_examples",
+        "node_registry",
+        "model_library",
+        "metadata_archive",
+        "backup",
+        "filesystem",
+        "custom_words",
+        "wildcards",
+        "supporters",
+        "doctor",
+        "example_workflows",
+        "base_model",
+        "model_source_handler",
+        "agent_handler",
+        "download_routing",
+        "sidecar_migration",
+    )
+    handlers = {name: _AnyHandler() for name in names}
+    handlers.update(overrides)
+    return MiscHandlerSet(**handlers)
+
+
+def test_every_misc_route_definition_resolves_to_a_handler():
+    """A route added to the table without a mapping entry 500s only on a live
+    server, so assert the whole table resolves here."""
+
+    mapping = _stub_misc_handler_set().to_route_mapping()
+
+    assert [
+        definition.handler_name
+        for definition in MISC_ROUTE_DEFINITIONS
+        if definition.handler_name not in mapping
+    ] == []
+
+
+def test_price_alert_endpoints_are_gone():
+    """The redesign removed the standalone alerts surface: obtainability is an
+    attribute of the update surfaces, so no route may serve an alert list."""
+
+    leftovers = [
+        definition
+        for definition in MISC_ROUTE_DEFINITIONS
+        if "price-alert" in definition.path or "price_alert" in definition.handler_name
+    ]
+
+    assert leftovers == []
