@@ -1101,6 +1101,7 @@ def _make_cache_entry(**overrides) -> Dict[str, Any]:
         "from_civitai": True,
         "favorite": False,
         "pinned": False,
+        "separate_card": False,
         "notes": "old note",
         "usage_tips": "{}",
         "metadata_source": None,

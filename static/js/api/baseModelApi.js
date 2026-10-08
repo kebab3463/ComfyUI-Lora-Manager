@@ -496,6 +496,24 @@ export class BaseModelApiClient {
         return response.json();
     }
 
+    /**
+     * Show a version as its own card (or return it to its model group).
+     * With allVersions, every local version of the model is split or merged.
+     */
+    async setSeparateCard(filePath, separate = true, { allVersions = false } = {}) {
+        const response = await fetch(this.apiConfig.endpoints.separateCard, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_path: filePath, separate, all_versions: allVersions }),
+        });
+
+        if (!response.ok) {
+            throw new Error(await response.text() || 'Failed to update card grouping');
+        }
+
+        return response.json();
+    }
+
     async addTags(filePath, data) {
         try {
             state.loadingManager.showSimpleLoading('Adding tags...');
@@ -1924,6 +1942,14 @@ export class BaseModelApiClient {
                 pageState.filters.modelTypes.forEach((type) => {
                     params.append('model_type', type);
                 });
+            }
+
+            // Civitai publish-date range (inclusive YYYY-MM-DD bounds)
+            if (pageState.filters.published?.from) {
+                params.append('published_from', pageState.filters.published.from);
+            }
+            if (pageState.filters.published?.to) {
+                params.append('published_to', pageState.filters.published.to);
             }
 
             // Add tag logic parameter (any = OR, all = AND)

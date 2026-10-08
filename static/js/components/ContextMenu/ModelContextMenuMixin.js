@@ -71,6 +71,57 @@ export const ModelContextMenuMixin = {
               );
     },
 
+    // A grouped card offers to split its versions into their own cards; a card
+    // that was split off offers to merge the model's versions back. The item is
+    // hidden where neither can change anything: grouping is off, or the model
+    // has a single local version.
+    updateSplitMenuItem(card) {
+        const splitItem = this.menu?.querySelector('[data-action="split-versions"]');
+        if (!splitItem || !card) return;
+
+        const isSeparate = card.dataset.separate_card === 'true';
+        const isGroupedCard = Number(card.dataset.version_count) > 1;
+        const visible = Boolean(state.global.settings.group_by_model) && (isSeparate || isGroupedCard);
+
+        splitItem.style.display = visible ? '' : 'none';
+        if (!visible) return;
+
+        const label = splitItem.querySelector('span');
+        if (label) {
+            label.textContent = isSeparate
+                ? translate('loras.contextMenu.mergeVersions', {}, 'Merge versions into one card')
+                : translate('loras.contextMenu.splitVersions', {}, 'Split versions into separate cards');
+        }
+    },
+
+    async toggleSplitVersions() {
+        const card = this.currentCard;
+        if (!card) return;
+
+        const separate = card.dataset.separate_card !== 'true';
+
+        try {
+            await getModelApiClient().setSeparateCard(card.dataset.filepath, separate, { allVersions: true });
+            showToast(
+                separate ? 'toast.models.versionsSplit' : 'toast.models.versionsMerged',
+                {},
+                'success'
+            );
+
+            const resetFn = this.resetAndReload || resetAndReload;
+            if (typeof resetFn === 'function') {
+                await resetFn(false);
+            }
+        } catch (error) {
+            console.error('Error splitting versions:', error);
+            showToast(
+                'toast.models.versionsSplitFailed',
+                { message: error?.message ?? 'Unknown error' },
+                'error'
+            );
+        }
+    },
+
     async togglePinVersion() {
         const card = this.currentCard;
         if (!card || !card.dataset.modelId) return;
@@ -623,6 +674,9 @@ export const ModelContextMenuMixin = {
                 return true;
             case 'pin-version':
                 this.togglePinVersion();
+                return true;
+            case 'split-versions':
+                this.toggleSplitVersions();
                 return true;
             case 'nvme-promote':
                 runNvmeCardAction(this.currentCard, togglePromoteNvme);

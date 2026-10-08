@@ -11,6 +11,9 @@ import { FilterPresetManager, EMPTY_WILDCARD_MARKER } from './FilterPresetManage
 // selected (the default) means no filtering.
 const LORA_AVAILABILITY_STATUSES = ['ready', 'missing', 'deleted'];
 
+// Bounds of the Civitai publish-date filter, as produced by <input type="date">.
+const ISO_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
 export class FilterManager {
     constructor(options = {}) {
         this.options = {
@@ -82,6 +85,8 @@ export class FilterManager {
         if (this.shouldShowLoraAvailabilityFilter()) {
             this.initializeLoraAvailabilityFilters();
         }
+
+        this.initializePublishedFilter();
 
         // Initialize tag logic toggle
         this.initializeTagLogicToggle();
@@ -404,6 +409,36 @@ export class FilterManager {
 
         // Update selections based on stored filters
         this.updateLicenseSelections();
+    }
+
+    initializePublishedFilter() {
+        this.publishedFromInput = document.getElementById('publishedFromInput');
+        this.publishedToInput = document.getElementById('publishedToInput');
+        if (!this.publishedFromInput || !this.publishedToInput) return;
+
+        const onChange = async () => {
+            this.filters.published = this.normalizePublishedFilter({
+                from: this.publishedFromInput.value,
+                to: this.publishedToInput.value,
+            });
+            this.updatePublishedSelections();
+            this.updateActiveFiltersCount();
+            await this.applyFilters(false);
+        };
+        this.publishedFromInput.addEventListener('change', onChange);
+        this.publishedToInput.addEventListener('change', onChange);
+
+        this.updatePublishedSelections();
+    }
+
+    updatePublishedSelections() {
+        if (!this.publishedFromInput || !this.publishedToInput) return;
+        const { from = '', to = '' } = this.filters.published || {};
+        this.publishedFromInput.value = from;
+        this.publishedToInput.value = to;
+        // Keep the picker from offering an inverted range.
+        this.publishedFromInput.max = to;
+        this.publishedToInput.min = from;
     }
 
     updateLicenseSelections() {
@@ -734,6 +769,8 @@ export class FilterManager {
             this.updateLoraAvailabilitySelections();
         }
 
+        this.updatePublishedSelections();
+
         const autoTagEls = document.querySelectorAll('.auto-tag-filter');
         autoTagEls.forEach(el => {
             const tag = el.dataset.autoTag;
@@ -763,7 +800,9 @@ export class FilterManager {
         const baseModelCount = this.filters.baseModel.filter(m => m !== EMPTY_WILDCARD_MARKER).length;
         // Active when at least one availability status is deselected
         const loraAvailabilityCount = this.filters.loraAvailability?.length ?? 0;
-        const totalActiveFilters = baseModelCount + tagFilterCount + autoTagFilterCount + licenseFilterCount + modelTypeFilterCount + loraAvailabilityCount;
+        // The date range counts as one filter whether one or both bounds are set
+        const publishedCount = Object.keys(this.filters.published || {}).length > 0 ? 1 : 0;
+        const totalActiveFilters = baseModelCount + tagFilterCount + autoTagFilterCount + licenseFilterCount + modelTypeFilterCount + loraAvailabilityCount + publishedCount;
 
         if (this.activeFiltersCount) {
             if (totalActiveFilters > 0) {
@@ -861,6 +900,7 @@ export class FilterManager {
             license: {},
             modelTypes: [],
             loraAvailability: [],
+            published: {},
             tagLogic: 'any'
         });
 
@@ -948,13 +988,15 @@ export class FilterManager {
         // Exclude EMPTY_WILDCARD_MARKER from base model count
         const baseModelCount = this.filters.baseModel.filter(m => m !== EMPTY_WILDCARD_MARKER).length;
         const loraAvailabilityCount = this.filters.loraAvailability?.length ?? 0;
+        const publishedCount = Object.keys(this.filters.published || {}).length;
         return (
             baseModelCount > 0 ||
             tagCount > 0 ||
             autoTagCount > 0 ||
             licenseCount > 0 ||
             modelTypeCount > 0 ||
-            loraAvailabilityCount > 0
+            loraAvailabilityCount > 0 ||
+            publishedCount > 0
         );
     }
 
@@ -968,6 +1010,7 @@ export class FilterManager {
             license: this.shouldShowLicenseFilters() ? this.normalizeLicenseFilters(source.license) : {},
             modelTypes: this.normalizeModelTypeFilters(source.modelTypes),
             loraAvailability: this.normalizeLoraAvailabilityFilters(source.loraAvailability),
+            published: this.normalizePublishedFilter(source.published),
             tagLogic: source.tagLogic || 'any'
         };
     }
@@ -1001,6 +1044,21 @@ export class FilterManager {
             acc.push(normalized);
             return acc;
         }, []);
+    }
+
+    // Only well-formed bounds are kept, so an empty object means "no filter".
+    normalizePublishedFilter(published) {
+        if (!published || typeof published !== 'object') {
+            return {};
+        }
+        const normalized = {};
+        ['from', 'to'].forEach((bound) => {
+            const value = published[bound];
+            if (typeof value === 'string' && ISO_DAY_PATTERN.test(value)) {
+                normalized[bound] = value;
+            }
+        });
+        return normalized;
     }
 
     normalizeTagFilters(tagFilters) {
@@ -1081,6 +1139,7 @@ export class FilterManager {
             license: { ...(this.filters.license || {}) },
             modelTypes: [...(this.filters.modelTypes || [])],
             loraAvailability: [...(this.filters.loraAvailability || [])],
+            published: { ...(this.filters.published || {}) },
             tagLogic: this.filters.tagLogic || 'any',
             search: pageState?.filters?.search ?? ''
         };

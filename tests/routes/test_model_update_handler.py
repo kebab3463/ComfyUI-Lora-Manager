@@ -108,6 +108,7 @@ async def test_build_version_context_includes_static_urls():
             "file_name": None,
             "preview_override": expected,
             "has_been_downloaded": False,
+            "separate_card": False,
         }
     }
 

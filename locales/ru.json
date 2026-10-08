@@ -207,6 +207,9 @@
         },
         "pinned": {
             "title": "[TODO: Translate] Pinned as this model's version"
+        },
+        "separateCard": {
+            "title": "Показана отдельной карточкой, независимо от других версий"
         }
     },
     "globalContextMenu": {
@@ -297,6 +300,10 @@
             "baseModelSearchPlaceholder": "Поиск базовых моделей...",
             "modelTags": "Теги",
             "modelTypes": "Типы моделей",
+            "publishedDate": "Опубликовано на Civitai",
+            "publishedDateTooltip": "Показывать модели, версия которых на Civitai опубликована в этом диапазоне дат. Модели без даты публикации на Civitai скрыты, пока активен этот фильтр.",
+            "publishedFrom": "С",
+            "publishedTo": "По",
             "license": "Лицензия",
             "noCreditRequired": "Без указания авторства",
             "allowSellingGeneratedContent": "Продажа разрешена",
@@ -1064,6 +1071,8 @@
             "unpinVersion": "[TODO: Translate] Unpin version",
             "pinVersionTooltip": "[TODO: Translate] Show this version on the grouped card instead of the latest one",
             "pinVersionUngroupable": "[TODO: Translate] This model has no Civitai or HuggingFace group to pin within",
+            "splitVersions": "Разделить версии на отдельные карточки",
+            "mergeVersions": "Объединить версии в одну карточку",
             "promoteToNvme": "Переместить на NVMe",
             "pinToNvme": "Закрепить на NVMe",
             "demoteFromNvme": "Убрать с NVMe",
@@ -2136,7 +2145,15 @@
                     "resumeModelUpdates": "Возобновить обновления для этой модели",
                     "ignoreModelUpdates": "Игнорировать обновления для этой модели",
                     "viewLocalVersions": "Показать все локальные версии",
-                    "viewLocalTooltip": "Показать все локальные версии этой модели на главной странице"
+                    "viewLocalTooltip": "Показать все локальные версии этой модели на главной странице",
+                    "ownCard": "Отдельная карточка",
+                    "ownCardTooltip": "Показывать эту версию отдельной карточкой в библиотеке, а не в группе с другими версиями",
+                    "joinGroup": "Вернуть в группу",
+                    "joinGroupTooltip": "Снова показывать эту версию в общей карточке модели",
+                    "splitAll": "Разделить на карточки",
+                    "splitAllTooltip": "Показывать каждую локальную версию этой модели отдельной карточкой в библиотеке",
+                    "mergeAll": "Объединить в одну карточку",
+                    "mergeAllTooltip": "Снова собрать все локальные версии этой модели в одну карточку"
                 },
                 "filters": {
                     "label": "Фильтр по базе",
@@ -2680,7 +2697,10 @@
             "bulkTagsReplaceFailed": "Не удалось заменить теги для моделей",
             "versionPinned": "[TODO: Translate] Version pinned - it now represents this model when grouping is on",
             "versionUnpinned": "[TODO: Translate] Version unpinned - the latest version represents this model again",
-            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}"
+            "versionPinFailed": "[TODO: Translate] Failed to pin version: {message}",
+            "versionsSplit": "Версии теперь показаны отдельными карточками",
+            "versionsMerged": "Версии снова объединены в одну карточку",
+            "versionsSplitFailed": "Не удалось обновить группировку карточек: {message}"
         },
         "search": {
             "atLeastOneOption": "Должен быть выбран хотя бы один вариант поиска"

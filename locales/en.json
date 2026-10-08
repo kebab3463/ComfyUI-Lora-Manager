@@ -207,6 +207,9 @@
     },
     "pinned": {
       "title": "Pinned version for this model"
+    },
+    "separateCard": {
+      "title": "Shown as its own card, separate from its other versions"
     }
   },
   "globalContextMenu": {
@@ -297,6 +300,10 @@
       "baseModelSearchPlaceholder": "Search base models...",
       "modelTags": "Tags",
       "modelTypes": "Model Types",
+      "publishedDate": "Published on Civitai",
+      "publishedDateTooltip": "Show models whose Civitai version was published in this date range. Models without a Civitai publish date are hidden while this filter is set.",
+      "publishedFrom": "From",
+      "publishedTo": "To",
       "license": "License",
       "noCreditRequired": "No Credit Required",
       "allowSellingGeneratedContent": "Allow Selling",
@@ -1064,6 +1071,8 @@
       "unpinVersion": "Unpin version",
       "pinVersionTooltip": "Show this version on the grouped card instead of the latest one",
       "pinVersionUngroupable": "This model has no Civitai or HuggingFace group to pin within",
+      "splitVersions": "Split versions into separate cards",
+      "mergeVersions": "Merge versions into one card",
       "promoteToNvme": "Promote to NVMe",
       "pinToNvme": "Pin to NVMe",
       "demoteFromNvme": "Demote from NVMe",
@@ -2136,7 +2145,15 @@
           "resumeModelUpdates": "Resume updates for this model",
           "ignoreModelUpdates": "Ignore updates for this model",
           "viewLocalVersions": "View all local versions",
-          "viewLocalTooltip": "Show all local versions of this model on the main page"
+          "viewLocalTooltip": "Show all local versions of this model on the main page",
+          "ownCard": "Own Card",
+          "ownCardTooltip": "Show this version as its own card in the library instead of grouping it with the other versions",
+          "joinGroup": "Rejoin Group",
+          "joinGroupTooltip": "Show this version on the model's grouped card again",
+          "splitAll": "Split into separate cards",
+          "splitAllTooltip": "Show every local version of this model as its own card in the library",
+          "mergeAll": "Merge into one card",
+          "mergeAllTooltip": "Group every local version of this model back onto one card"
         },
         "filters": {
           "label": "Base filter",
@@ -2680,7 +2697,10 @@
       "bulkTagsReplaceFailed": "Failed to replace tags for models",
       "versionPinned": "Version pinned - it now represents this model when grouping is on",
       "versionUnpinned": "Version unpinned - the latest version represents this model again",
-      "versionPinFailed": "Failed to pin version: {message}"
+      "versionPinFailed": "Failed to pin version: {message}",
+      "versionsSplit": "Versions now shown as separate cards",
+      "versionsMerged": "Versions grouped back into one card",
+      "versionsSplitFailed": "Failed to update card grouping: {message}"
     },
     "search": {
       "atLeastOneOption": "At least one search option must be selected"

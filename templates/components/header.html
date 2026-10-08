@@ -297,6 +297,19 @@
   </div>
   {% endif %}
   {% if current_page != 'recipes' %}
+  <div class="filter-section" id="publishedDateFilter">
+    <h4>{{ t('header.filter.publishedDate') }}</h4>
+    <div class="filter-date-range" title="{{ t('header.filter.publishedDateTooltip') }}">
+      <label class="filter-date-field">
+        <span>{{ t('header.filter.publishedFrom') }}</span>
+        <input type="date" id="publishedFromInput" class="filter-search-input filter-date-input">
+      </label>
+      <label class="filter-date-field">
+        <span>{{ t('header.filter.publishedTo') }}</span>
+        <input type="date" id="publishedToInput" class="filter-search-input filter-date-input">
+      </label>
+    </div>
+  </div>
   <div class="filter-section">
     <h4>{{ t('header.filter.license') }}</h4>
     <div class="filter-tags">

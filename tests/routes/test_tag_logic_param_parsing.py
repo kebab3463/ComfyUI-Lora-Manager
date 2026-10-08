@@ -166,3 +166,26 @@ async def test_tag_logic_without_include_tags(handler):
 
     # tag_logic should still be set even without tag filters
     assert service.last_call_kwargs["tag_logic"] == "all"
+
+
+@pytest.mark.asyncio
+async def test_published_date_range_is_forwarded(handler):
+    h, service = handler
+
+    response = await make_request(h, "published_from=2024-03-01&published_to=2024-03-31")
+    assert response.status == 200
+
+    assert service.last_call_kwargs["published_from"] == "2024-03-01"
+    assert service.last_call_kwargs["published_to"] == "2024-03-31"
+
+
+@pytest.mark.asyncio
+async def test_malformed_published_dates_are_ignored(handler):
+    """A bad bound must not silently filter everything out."""
+    h, service = handler
+
+    response = await make_request(h, "published_from=yesterday&published_to=2024-3-1")
+    assert response.status == 200
+
+    assert service.last_call_kwargs["published_from"] is None
+    assert service.last_call_kwargs["published_to"] is None

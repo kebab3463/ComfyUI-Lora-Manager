@@ -1034,6 +1034,7 @@ class ModelScanner:
             'from_civitai': bool(get_value('from_civitai', True)),
             'favorite': bool(get_value('favorite', False)),
             'pinned': bool(get_value('pinned', False)),
+            'separate_card': bool(get_value('separate_card', False)),
             'notes': notes,
             'usage_tips': usage_tips,
             'metadata_source': get_value('metadata_source', None),
