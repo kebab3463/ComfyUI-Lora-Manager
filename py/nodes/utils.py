@@ -373,3 +373,34 @@ def detect_nunchaku_model_kind(model):
         return "qwen_image"
 
     return None
+
+
+async def library_trigger_words_fingerprint() -> str:
+    """Fingerprint the trigger words of every LoRA in the library.
+
+    Nodes that output ``trigger_words`` look them up in the library rather than
+    receiving them as inputs, so ComfyUI's execution cache cannot tell when an
+    edit made a cached result stale. Returned from ``IS_CHANGED``, this makes
+    those nodes re-run after any trigger-word edit and stay cached otherwise.
+
+    It covers the whole library, not just a node's own LoRAs, because LoRAs
+    can also arrive through linked stacks or text that ``IS_CHANGED`` never
+    sees. The fingerprint ignores cache order and every other metadata field.
+    """
+    import hashlib
+
+    from ..services.service_registry import ServiceRegistry
+
+    scanner = await ServiceRegistry.get_lora_scanner()
+    cache = await scanner.get_cached_data()
+
+    entries = []
+    # Snapshot: the cache can be mutated from another thread while we iterate.
+    for item in list(cache.raw_data):
+        civitai = item.get("civitai") or {}
+        words = civitai.get("trainedWords") or []
+        if words:
+            entries.append((item.get("file_path") or "", tuple(words)))
+    entries.sort()
+
+    return hashlib.sha1(repr(entries).encode("utf-8")).hexdigest()

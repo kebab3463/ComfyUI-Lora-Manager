@@ -1,7 +1,7 @@
 import os
 from ..utils.utils import get_lora_info_absolute
 from ..config import config
-from .utils import any_type 
+from .utils import any_type , library_trigger_words_fingerprint
 import logging
 
 # 初始化日志记录器
@@ -43,6 +43,11 @@ class WanVideoLoraTextSelectLM:
                 "blocks": ("BLOCKS",)        
             }
         }
+
+    @classmethod
+    async def IS_CHANGED(cls, **kwargs):
+        # trigger_words come from the library, not the inputs: re-run after an edit.
+        return await library_trigger_words_fingerprint()
 
     RETURN_TYPES = ("WANVIDLORA", "STRING", "STRING")
     RETURN_NAMES = ("lora", "trigger_words", "active_loras")

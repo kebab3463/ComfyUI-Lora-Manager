@@ -11,6 +11,7 @@ import os
 
 from ..utils.utils import get_lora_info_absolute
 from .utils import (
+    library_trigger_words_fingerprint,
     FlexibleOptionalInputType,
     any_type,
     apply_lora_syntax_format,
@@ -48,6 +49,11 @@ class CreateHookLoraLM:
     def VALIDATE_INPUTS(cls, loras=None):
         """Queue-time validation: reject missing local LoRAs before execution."""
         return validate_lora_entries({"loras": loras}) or True
+
+    @classmethod
+    async def IS_CHANGED(cls, **kwargs):
+        # trigger_words come from the library, not the inputs: re-run after an edit.
+        return await library_trigger_words_fingerprint()
 
     RETURN_TYPES = ("HOOKS", "STRING", "STRING")
     RETURN_NAMES = ("HOOKS", "trigger_words", "active_loras")
