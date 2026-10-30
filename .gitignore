@@ -50,3 +50,5 @@ tests/enrich_hf_validation/baselines/
 .venv/
 
 .envrc
+
+.specstory/
