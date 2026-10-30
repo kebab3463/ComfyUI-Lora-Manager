@@ -7,7 +7,7 @@ from .constants import IMAGES
 standalone_mode = os.environ.get("LORA_MANAGER_STANDALONE", "0") == "1" or os.environ.get("HF_HUB_DISABLE_TELEMETRY", "0") == "0"
 
 from .constants import MODELS, PROMPTS, SAMPLING, LORAS, SIZE, IS_SAMPLER, OVERWRITE
-from .node_extractors import NODE_EXTRACTORS
+from .node_extractors import NODE_EXTRACTORS, _get_variable_name
 
 logger = logging.getLogger(__name__)
 
@@ -356,8 +356,18 @@ class MetadataProcessor:
                     # Handle pipe nodes like FromBasicPipe by following the pipeline
                     next_input_name = "basic_pipe"
                 else:
-                    # Dead end - no model input to follow
-                    return None
+                    # No direct model input to follow. GetNode (KJNodes) links
+                    # are virtual and absent from the API prompt — resolve the
+                    # variable reference back to the SetNode's MODEL source
+                    # before giving up.
+                    resolved_id = MetadataProcessor._resolve_model_variable_source(
+                        metadata, prompt, current_node_id
+                    )
+                    if resolved_id is None:
+                        return None
+                    current_node_id = resolved_id
+                    depth += 1
+                    continue
             
             # Get connected node
             input_val = inputs[next_input_name]
@@ -369,6 +379,57 @@ class MetadataProcessor:
             depth += 1
             
         return None
+
+    @staticmethod
+    def _resolve_model_variable_source(metadata, prompt, node_id):
+        """Resolve a GetNode-style virtual reference to its MODEL source node.
+
+        SetNodeExtractor records ``model_variable`` entries (variable name →
+        source node id) when a SetNode carrying a MODEL link executes, and
+        GetNodeExtractor records the variable name each GetNode reads. When
+        both are available, the virtual Set/Get link can be followed just like
+        a real connection.
+        """
+        if not prompt or not getattr(prompt, "original_prompt", None):
+            return None
+        if node_id not in prompt.original_prompt:
+            return None
+
+        # Variable name read by this node: prefer the runtime record,
+        # fall back to the prompt inputs.
+        variable_name = None
+        prompt_info = metadata.get(PROMPTS, {}).get(node_id)
+        if isinstance(prompt_info, dict):
+            variable_name = prompt_info.get("variable_name")
+        if not variable_name:
+            node_inputs = prompt.original_prompt[node_id].get("inputs", {})
+            variable_name = _get_variable_name(node_inputs)
+        if not variable_name:
+            return None
+
+        candidates = [
+            info
+            for info in metadata.get(MODELS, {}).values()
+            if isinstance(info, dict)
+            and info.get("type") == "model_variable"
+            and info.get("variable_name") == variable_name
+            and info.get("source_node_id")
+        ]
+        if not candidates:
+            return None
+
+        # KJNodes semantics: when several SetNodes share a variable name,
+        # the last one to execute wins.
+        execution_order = metadata.get("execution_order") or []
+
+        def _order(info):
+            try:
+                return execution_order.index(info.get("node_id"))
+            except ValueError:
+                return -1
+
+        best = max(candidates, key=_order)
+        return best.get("source_node_id")
 
     @staticmethod
     def find_primary_checkpoint(metadata, downstream_id=None, primary_sampler_id=None):
@@ -693,16 +754,17 @@ class MetadataProcessor:
             params["clip_skip"] = "1"
 
         # ---- Apply manual metadata overwrites ----
-        for overwrite_info in metadata.get(OVERWRITE, {}).values():
-            overwrite_params = overwrite_info.get("parameters", {})
-            for key, value in overwrite_params.items():
-                if key == "clip_skip":
-                    # Accept any value from overwrite node (sentinel -25 already
-                    # filtered upstream).  Needed because falsy check treats 0
-                    # as "not set" even though 0 is a valid wired input here.
-                    params[key] = value
-                elif value:  # truthy check — only overwrite when user provided a real value
-                    params[key] = value
+        # Overwrite nodes whose METADATA output is wired into a Save Image node
+        # are scoped to that connection and applied by the save node itself;
+        # they must not leak into the global merge below (which is the legacy
+        # behavior for unwired overwrite nodes).
+        wired_overwrite_ids = MetadataProcessor._get_wired_overwrite_node_ids(metadata)
+        for node_id, overwrite_info in metadata.get(OVERWRITE, {}).items():
+            if node_id in wired_overwrite_ids:
+                continue
+            MetadataProcessor.apply_overwrite_params(
+                params, overwrite_info.get("parameters", {})
+            )
 
         # Bridge: the overwrite node exposes the field as "model" (more accurate),
         # but the internal pipeline key remains "checkpoint" for backward compatibility
@@ -712,6 +774,60 @@ class MetadataProcessor:
             del params["model"]
 
         return params
+
+    @staticmethod
+    def apply_overwrite_params(params, overwrite_params):
+        """Merge overwrite-node parameters over extracted params.
+
+        clip_skip accepts any value (the sentinel -25 is already filtered
+        upstream) because the falsy check would treat a wired 0 as "not set";
+        every other field only overwrites when truthy.
+        """
+        for key, value in overwrite_params.items():
+            if key == "clip_skip":
+                params[key] = value
+            elif value:
+                params[key] = value
+
+        # Bridge: the overwrite node exposes the field as "model" (more
+        # accurate), but the internal pipeline key remains "checkpoint" for
+        # backward compatibility with A1111 metadata format and downstream
+        # consumers.
+        if params.get("model"):
+            params["checkpoint"] = params["model"]
+            del params["model"]
+
+        return params
+
+    @staticmethod
+    def _get_wired_overwrite_node_ids(metadata):
+        """Return IDs of overwrite nodes whose METADATA output is wired into a
+        Save Image (LoraManager) node in the current prompt graph."""
+        overwrite = metadata.get(OVERWRITE, {})
+        if not overwrite:
+            return set()
+
+        prompt = metadata.get("current_prompt")
+        original_prompt = getattr(prompt, "original_prompt", None) if prompt else None
+        if not original_prompt:
+            return set()
+
+        wired_ids = set()
+        for node_data in original_prompt.values():
+            if not isinstance(node_data, dict):
+                continue
+            class_type = node_data.get("class_type", "")
+            if class_type not in ("Save Image (LoraManager)", "SaveImageLM"):
+                continue
+            for input_value in node_data.get("inputs", {}).values():
+                # Input connections are formatted as [node_id, output_index]
+                if (
+                    isinstance(input_value, list)
+                    and len(input_value) >= 2
+                    and str(input_value[0]) in overwrite
+                ):
+                    wired_ids.add(str(input_value[0]))
+        return wired_ids
     
     @staticmethod
     def to_dict(metadata, id=None):

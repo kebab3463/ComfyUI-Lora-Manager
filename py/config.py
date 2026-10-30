@@ -4,7 +4,6 @@
 # import cycles. Breaking them would require an architectural refactor.
 import os
 import platform
-import posixpath
 import threading
 from pathlib import Path
 import folder_paths  # pyright: ignore[reportMissingImports]
@@ -20,6 +19,7 @@ from .utils.cache_paths import CacheType, get_cache_file_path, get_legacy_cache_
 from .utils.constants import (
     OTHER_MODEL_FOLDER_SUBTYPES,
 )
+from .utils.root_paths import normalize_root_identity
 from .utils.settings_paths import (
     ensure_settings_file,
     get_settings_dir,
@@ -34,14 +34,15 @@ standalone_mode = (
 
 logger = logging.getLogger(__name__)
 
-
-def _normalize_root_identity(path: str) -> str:
-    """Normalize a root path for comparisons across slash styles."""
-
-    normalized = posixpath.normpath(path.strip().replace("\\", "/"))
-    if len(normalized) >= 2 and normalized[1] == ":":
-        return normalized.lower()
-    return normalized
+# Saved folder-path keys mapped to the model type whose cache can tell whether a
+# root that is missing right now is still worth keeping (issue #1146). The
+# checkpoint page holds both checkpoints and unet roots.
+_CACHE_MODEL_TYPE_BY_FOLDER_KEY = {
+    "loras": "lora",
+    "checkpoints": "checkpoint",
+    "unet": "checkpoint",
+    "embeddings": "embedding",
+}
 
 
 def _append_new_paths(current: List[str], candidates: Iterable[str]) -> List[str]:
@@ -52,11 +53,11 @@ def _append_new_paths(current: List[str], candidates: Iterable[str]) -> List[str
     to the root *order* would move user data.
     """
     merged = list(current)
-    seen = {_normalize_root_identity(path) for path in merged}
+    seen = {normalize_root_identity(path) for path in merged}
     for path in candidates:
         if not isinstance(path, str) or not path.strip():
             continue
-        identity = _normalize_root_identity(path)
+        identity = normalize_root_identity(path)
         if identity in seen:
             continue
         seen.add(identity)
@@ -78,15 +79,15 @@ def _resolve_valid_default_root(
         stripped = path.strip()
         if not stripped:
             continue
-        identity = _normalize_root_identity(stripped)
+        identity = normalize_root_identity(stripped)
         if identity in seen:
             continue
         seen.add(identity)
         fallback_paths.append(stripped)
 
-    allowed = {_normalize_root_identity(path) for path in fallback_paths}
+    allowed = {normalize_root_identity(path) for path in fallback_paths}
 
-    if current and _normalize_root_identity(current) in allowed:
+    if current and normalize_root_identity(current) in allowed:
         return current
 
     if not valid_paths:
@@ -208,6 +209,12 @@ class Config:
         self.other_root_subtypes: Dict[str, str] = {}
         self.other_folder_roots: Dict[str, List[str]] = {}
         self.other_roots = self._init_other_paths()
+        # Workflow roots (ComfyUI workflow JSON library). Opt-in feature:
+        # empty while ``enable_workflows`` is off. Not a ComfyUI folder_paths
+        # category — sourced from LoRA Manager's own settings in both modes.
+        self.workflows_roots: List[str] = []
+        self.extra_workflows_roots: List[str] = []
+        self.workflows_roots = self._init_workflow_paths()
         # Extra paths (only for LoRA Manager, not shared with ComfyUI)
         self.extra_loras_roots: List[str] = []
         self.extra_checkpoints_roots: List[str] = []
@@ -264,8 +271,9 @@ class Config:
             extra_checkpoint = extra_folder_paths.get("checkpoints", []) or []
             extra_unet = extra_folder_paths.get("unet", []) or []
             extra_embedding = extra_folder_paths.get("embeddings", []) or []
+            extra_workflows = extra_folder_paths.get("workflows", []) or []
 
-            if not any([extra_lora, extra_checkpoint, extra_unet, extra_embedding]):
+            if not any([extra_lora, extra_checkpoint, extra_unet, extra_embedding, extra_workflows]):
                 return
 
             filtered_extra_lora = self._filter_overlapping_extra_lora_paths(
@@ -280,6 +288,8 @@ class Config:
             self.extra_embeddings_roots = self._prepare_embedding_paths(
                 extra_embedding
             )
+            if settings_manager.is_workflows_enabled():
+                self.extra_workflows_roots = self._prepare_lora_paths(extra_workflows)
 
             if self.extra_loras_roots:
                 logger.info(
@@ -319,6 +329,77 @@ class Config:
             logger.debug(
                 "Could not load extra paths from library settings: %s", exc
             )
+
+    def _drop_missing_roots_without_cache(
+        self,
+        folder_paths_map: Dict[str, List[str]],
+        default_roots: Mapping[str, str],
+    ) -> Dict[str, List[str]]:
+        """Drop saved roots that neither exist nor hold cached entries (issue #1146).
+
+        The startup sync persists what is *configured* rather than what is readable,
+        so a switched-off drive keeps its path (see ``save_folder_paths_to_settings``).
+        A directory the host registered without ever creating it -- ComfyUI adds
+        ``<output>/loras`` and friends for its save nodes whether or not they exist --
+        came along for the ride and stayed there as a permanently "unavailable" root.
+
+        A root that still holds cached entries is exactly the switched-off drive the
+        persistence exists for, so it is kept. A root named by the library's
+        ``default_*_root`` is kept even when it is empty: dropping it would let the
+        next boot repair the default onto another root.
+
+        Best effort: when the cache cannot be consulted, every root is kept.
+        """
+
+        try:
+            from .services.persistent_model_cache import get_persistent_cache
+
+            cache = get_persistent_cache()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("Keeping every configured model root: %s", exc)
+            return folder_paths_map
+
+        protected = {
+            identity
+            for identity in (
+                normalize_root_identity(path) for path in default_roots.values()
+            )
+            if identity
+        }
+
+        filtered: Dict[str, List[str]] = {}
+        for key, paths in folder_paths_map.items():
+            missing = [path for path in paths if not os.path.exists(path)]
+            if not missing:
+                filtered[key] = list(paths)
+                continue
+
+            probe = [
+                path
+                for path in missing
+                if normalize_root_identity(path) not in protected
+            ]
+            try:
+                cached = cache.roots_with_cached_entries(
+                    _CACHE_MODEL_TYPE_BY_FOLDER_KEY.get(key, "other"), probe
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Keeping every configured %s root (%s): %s", key, missing, exc
+                )
+                filtered[key] = list(paths)
+                continue
+
+            cached_ids = {normalize_root_identity(path) for path in cached}
+            filtered[key] = [
+                path
+                for path in paths
+                if os.path.exists(path)
+                or normalize_root_identity(path) in protected
+                or normalize_root_identity(path) in cached_ids
+            ]
+
+        return filtered
 
     def save_folder_paths_to_settings(self):
         """Persist ComfyUI-derived folder paths to the multi-library settings."""
@@ -388,6 +469,15 @@ class Config:
                     self.embeddings_roots or [],
                 ),
             }
+            # Workflow roots live only in our settings (the host has no such
+            # category); persist them so the whitelist rebuild above does not
+            # erase the key. Empty lists are still written when the key was
+            # configured before, so a deliberate removal round-trips.
+            workflow_configured = self.configured_roots_for("workflow")
+            if workflow_configured or self.workflows_roots:
+                target_folder_paths["workflows"] = _append_new_paths(
+                    workflow_configured, self.workflows_roots or []
+                )
             # Persist the other-model roots under their original folder_paths
             # keys so library switching round-trips them.
             for key, roots in (self.other_folder_roots or {}).items():
@@ -533,9 +623,26 @@ class Config:
                 or self._should_activate_comfy_library(libraries, libraries_changed)
             )
 
+            # A root that the host registered but never created (and that holds no
+            # cached models) is not a library path: persisting it would bring it
+            # back as an unavailable root on every boot, and in standalone mode the
+            # saved paths are the only source of truth (issue #1146).
+            default_roots = {
+                "loras": default_lora_root
+                or comfy_library.get("default_lora_root", ""),
+                "checkpoints": default_checkpoint_root
+                or comfy_library.get("default_checkpoint_root", ""),
+                "unet": comfy_library.get("default_unet_root", ""),
+                "embeddings": default_embedding_root
+                or comfy_library.get("default_embedding_root", ""),
+            }
+            persisted_folder_paths = self._drop_missing_roots_without_cache(
+                target_folder_paths, default_roots
+            )
+
             settings_service.upsert_library(
                 "comfyui",
-                folder_paths=target_folder_paths,
+                folder_paths=persisted_folder_paths,
                 extra_folder_paths=extra_folder_paths,
                 default_lora_root=default_lora_root,
                 default_checkpoint_root=default_checkpoint_root,
@@ -673,13 +780,86 @@ class Config:
             if fingerprint_valid and mappings_valid:
                 return
 
-            logger.info("Symlink configuration changed; rescanning symbolic links")
+            logger.info(
+                "Symlink configuration changed; rescanning symbolic links (%s)",
+                self._describe_symlink_cache_invalidation(current_fingerprint),
+            )
 
         self.rebuild_symlink_cache()
         logger.info(
             "Symlink mappings rebuilt and cached in %.2f ms",
             (time.perf_counter() - start) * 1000,
         )
+
+    def _describe_symlink_cache_invalidation(
+        self, current_fingerprint: Dict[str, object]
+    ) -> str:
+        """Summarize why the persisted symlink cache was invalidated.
+
+        Distinguishes a fingerprint mismatch (root set or first-level symlink
+        layout changed) from a stale mapping (a cached link vanished or was
+        retargeted), so the startup log records what actually changed instead
+        of a bare "configuration changed".
+        """
+        cached = self._cached_fingerprint
+        if not isinstance(cached, dict) or not cached:
+            return "cache has no usable fingerprint"
+
+        if current_fingerprint == cached:
+            return "cached symlink mapping failed validation"
+
+        def _root_set(value: object) -> Set[str]:
+            if not isinstance(value, list):
+                return set()
+            return {item for item in value if isinstance(item, str)}
+
+        def _link_set(value: object) -> Set[Tuple[str, str]]:
+            pairs: Set[Tuple[str, str]] = set()
+            if isinstance(value, list):
+                for entry in value:
+                    if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                        pairs.add((str(entry[0]), str(entry[1])))
+            return pairs
+
+        def _format(items: List[str]) -> str:
+            shown = items[:3]
+            suffix = f" +{len(items) - 3} more" if len(items) > 3 else ""
+            return ", ".join(shown) + suffix
+
+        reasons: List[str] = []
+        added_roots = sorted(
+            _root_set(current_fingerprint.get("roots"))
+            - _root_set(cached.get("roots"))
+        )
+        removed_roots = sorted(
+            _root_set(cached.get("roots"))
+            - _root_set(current_fingerprint.get("roots"))
+        )
+        if added_roots:
+            reasons.append(f"roots added: {_format(added_roots)}")
+        if removed_roots:
+            reasons.append(f"roots removed: {_format(removed_roots)}")
+
+        added_links = sorted(
+            _link_set(current_fingerprint.get("direct_symlinks"))
+            - _link_set(cached.get("direct_symlinks"))
+        )
+        removed_links = sorted(
+            _link_set(cached.get("direct_symlinks"))
+            - _link_set(current_fingerprint.get("direct_symlinks"))
+        )
+        if added_links:
+            reasons.append(
+                "symlinks added: "
+                + _format([f"{link} -> {target}" for link, target in added_links])
+            )
+        if removed_links:
+            reasons.append(
+                "symlinks removed: "
+                + _format([f"{link} -> {target}" for link, target in removed_links])
+            )
+
+        return "; ".join(reasons) or "fingerprint structure differs"
 
     def rebuild_symlink_cache(self) -> None:
         """Force a fresh scan of all symbolic links and update the persistent cache."""
@@ -782,14 +962,14 @@ class Config:
 
             # Check if symlink still exists
             if not self._is_link(link_path):
-                logger.debug("Cached symlink no longer exists: %s", link_path)
+                logger.info("Cached symlink no longer exists: %s", link_path)
                 return False
 
             # Check if target is still the same
             try:
                 actual_target = self._normalize_path(os.path.realpath(link_path))
                 if actual_target != target:
-                    logger.debug(
+                    logger.info(
                         "Symlink target changed: %s -> %s (cached: %s)",
                         link_path,
                         actual_target,
@@ -797,7 +977,7 @@ class Config:
                     )
                     return False
             except OSError:
-                logger.debug("Cannot resolve symlink: %s", link_path)
+                logger.info("Cannot resolve symlink: %s", link_path)
                 return False
 
         return True
@@ -962,6 +1142,8 @@ class Config:
             preview_roots.update(self._expand_preview_root(root))
         for root in self.other_roots or []:
             preview_roots.update(self._expand_preview_root(root))
+        for root in self.workflows_roots or []:
+            preview_roots.update(self._expand_preview_root(root))
         # Include extra paths for preview access
         for root in self.extra_loras_roots or []:
             preview_roots.update(self._expand_preview_root(root))
@@ -970,6 +1152,8 @@ class Config:
         for root in self.extra_unet_roots or []:
             preview_roots.update(self._expand_preview_root(root))
         for root in self.extra_embeddings_roots or []:
+            preview_roots.update(self._expand_preview_root(root))
+        for root in self.extra_workflows_roots or []:
             preview_roots.update(self._expand_preview_root(root))
         if self.recipes_path:
             preview_roots.update(self._expand_preview_root(self.recipes_path))
@@ -1434,12 +1618,28 @@ class Config:
             self.other_folder_roots,
         ) = self._prepare_other_paths(other_path_map)
 
+        # Workflow roots ride the same library folder_paths structure but are
+        # not a ComfyUI category; the live list stays empty while the opt-in
+        # feature is off.
+        workflow_paths = folder_paths.get("workflows", []) or []
+        self._remember_configured_paths("workflow", workflow_paths)
+        try:
+            from .services.settings_manager import get_settings_manager
+
+            workflows_enabled = get_settings_manager().is_workflows_enabled()
+        except Exception:  # pragma: no cover - defensive fallback
+            workflows_enabled = False
+        self.workflows_roots = (
+            self._prepare_lora_paths(workflow_paths) if workflows_enabled else []
+        )
+
         # Process extra paths (only for LoRA Manager, not shared with ComfyUI)
         extra_paths = extra_folder_paths or {}
         extra_lora_paths = extra_paths.get("loras", []) or []
         extra_checkpoint_paths = extra_paths.get("checkpoints", []) or []
         extra_unet_paths = extra_paths.get("unet", []) or []
         extra_embedding_paths = extra_paths.get("embeddings", []) or []
+        extra_workflow_paths = extra_paths.get("workflows", []) or []
 
         filtered_extra_lora_paths = self._filter_overlapping_extra_lora_paths(
             self.loras_roots,
@@ -1453,6 +1653,9 @@ class Config:
         ) = self._prepare_checkpoint_paths(extra_checkpoint_paths, extra_unet_paths)
         self.extra_embeddings_roots = self._prepare_embedding_paths(
             extra_embedding_paths
+        )
+        self.extra_workflows_roots = (
+            self._prepare_lora_paths(extra_workflow_paths) if workflows_enabled else []
         )
 
         # Log extra folder paths
@@ -1647,6 +1850,85 @@ class Config:
             logger.warning(f"Error initializing other model paths: {e}")
             return []
 
+    def _get_configured_workflow_paths(self) -> List[str]:
+        """Read the workflows folder_paths entry from the active library.
+
+        "workflows" is not a ComfyUI folder_paths category (the host raises
+        KeyError for unknown keys), so both modes source workflow roots from
+        LoRA Manager's own settings.
+        """
+        try:
+            from .services.settings_manager import get_settings_manager
+
+            library_config = get_settings_manager().get_active_library()
+        except Exception:
+            return []
+        if not isinstance(library_config, Mapping):
+            return []
+        folder_paths_config = library_config.get("folder_paths")
+        if not isinstance(folder_paths_config, Mapping):
+            return []
+        raw_paths = folder_paths_config.get("workflows", [])
+        if not isinstance(raw_paths, list):
+            return []
+        return [path for path in raw_paths if isinstance(path, str) and path.strip()]
+
+    def _init_workflow_paths(self) -> List[str]:
+        """Initialize and validate workflow roots.
+
+        Opt-in feature: the live root list stays empty while
+        ``enable_workflows`` is off, but the configured paths are still
+        remembered so ``save_folder_paths_to_settings()`` round-trips them.
+        """
+        try:
+            raw_paths = self._get_configured_workflow_paths()
+            self._remember_configured_paths("workflow", raw_paths)
+
+            from .services.settings_manager import get_settings_manager
+
+            if not get_settings_manager().is_workflows_enabled():
+                return []
+
+            unique_paths = self._prepare_lora_paths(raw_paths)
+            logger.info(
+                "Found workflow roots:"
+                + ("\n - " + "\n - ".join(unique_paths) if unique_paths else "[]")
+            )
+            return unique_paths
+        except Exception as e:
+            logger.warning(f"Error initializing workflow paths: {e}")
+            return []
+
+    def refresh_workflow_roots(self) -> None:
+        """Rebuild workflow roots after the opt-in toggle or paths change.
+
+        Called when ``enable_workflows`` or the workflows folder_paths are
+        updated so the scanner immediately reflects the new folder set
+        without a full application restart.
+        """
+        self.workflows_roots = self._init_workflow_paths()
+        try:
+            from .services.settings_manager import get_settings_manager
+
+            settings_manager = get_settings_manager()
+            extra_workflows: List[str] = []
+            if settings_manager.is_workflows_enabled():
+                library_config = settings_manager.get_active_library()
+                if isinstance(library_config, Mapping):
+                    extra_config = library_config.get("extra_folder_paths")
+                    if isinstance(extra_config, Mapping):
+                        raw_extra = extra_config.get("workflows", [])
+                        if isinstance(raw_extra, list):
+                            extra_workflows = [
+                                path
+                                for path in raw_extra
+                                if isinstance(path, str) and path.strip()
+                            ]
+            self.extra_workflows_roots = self._prepare_lora_paths(extra_workflows)
+        except Exception:  # pragma: no cover - defensive fallback
+            self.extra_workflows_roots = []
+        self._rebuild_preview_roots()
+
     def _remember_configured_paths(
         self, model_type: str, paths: Iterable[str]
     ) -> None:
@@ -1679,6 +1961,30 @@ class Config:
         """
         return list((getattr(self, "_configured_root_paths", None) or {}).get(model_type, []))
 
+    @staticmethod
+    def _unadmitted_paths(
+        configured: Iterable[str], live: Iterable[str]
+    ) -> List[str]:
+        """Configured roots missing from the live list.
+
+        Admission only ever appends, so a root that is already live can never
+        gain a new entry from re-preparation. Skipping those avoids an
+        ``os.path.exists``/``os.path.realpath`` stat per configured root on
+        every call — a single stat is enough to spin up a sleeping drive,
+        which made even a single-root scan touch every configured disk.
+        """
+        live_identities = {
+            Config._normalize_path_for_comparison(path)
+            for path in (live or [])
+            if isinstance(path, str)
+        }
+        return [
+            path
+            for path in configured
+            if isinstance(path, str)
+            and Config._normalize_path_for_comparison(path) not in live_identities
+        ]
+
     def admit_configured_roots(self) -> List[str]:
         """Append configured roots that became readable again, never removing any.
 
@@ -1688,6 +1994,10 @@ class Config:
         paths and appending only the new entries is what makes "plug the drive
         in, scan it" work without a restart. Nothing is ever dropped or
         re-ordered — see ``_append_new_paths`` for why order matters.
+
+        Only configured roots that are not live yet are probed on the
+        filesystem (``_unadmitted_paths``); already-live roots are skipped so
+        routine scans never stat healthy drives.
 
         Returns the paths that were admitted by this call.
         """
@@ -1701,14 +2011,20 @@ class Config:
             return merged
 
         try:
-            lora_configured = self.configured_roots_for("lora")
+            lora_configured = self._unadmitted_paths(
+                self.configured_roots_for("lora"), self.loras_roots
+            )
             if lora_configured:
                 self.loras_roots = _extend(
                     self.loras_roots, self._prepare_lora_paths(lora_configured)
                 )
 
-            checkpoint_configured = self.configured_roots_for("checkpoint")
-            unet_configured = self.configured_roots_for("unet")
+            checkpoint_configured = self._unadmitted_paths(
+                self.configured_roots_for("checkpoint"), self.checkpoints_roots
+            )
+            unet_configured = self._unadmitted_paths(
+                self.configured_roots_for("unet"), self.unet_roots
+            )
             if checkpoint_configured or unet_configured:
                 (
                     all_roots,
@@ -1721,28 +2037,31 @@ class Config:
                 self.checkpoints_roots = _extend(self.checkpoints_roots, checkpoint_roots)
                 self.unet_roots = _extend(self.unet_roots, unet_roots)
 
-            embedding_configured = self.configured_roots_for("embedding")
+            embedding_configured = self._unadmitted_paths(
+                self.configured_roots_for("embedding"), self.embeddings_roots
+            )
             if embedding_configured:
                 self.embeddings_roots = _extend(
                     self.embeddings_roots,
                     self._prepare_embedding_paths(embedding_configured),
                 )
 
-            other_configured = self.configured_roots_for("other")
-            if other_configured:
+            other_missing_by_key = {
+                key: missing
+                for key in self._get_enabled_other_folder_keys()
+                if (
+                    missing := self._unadmitted_paths(
+                        self._configured_other_paths_for_key(key),
+                        self.other_folder_roots.get(key, []),
+                    )
+                )
+            }
+            if other_missing_by_key:
                 (
                     other_roots,
                     other_subtypes,
                     other_per_key,
-                ) = self._prepare_other_paths(
-                    {
-                        key: [
-                            path
-                            for path in self._configured_other_paths_for_key(key)
-                        ]
-                        for key in self._get_enabled_other_folder_keys()
-                    }
-                )
+                ) = self._prepare_other_paths(other_missing_by_key)
                 self.other_roots = _extend(self.other_roots, other_roots)
                 for root, sub_type in other_subtypes.items():
                     self.other_root_subtypes.setdefault(root, sub_type)

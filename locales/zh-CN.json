@@ -160,7 +160,9 @@
             "promoteToNvme": "提升到 NVMe（复制到高速缓存）",
             "pinToNvme": "固定到 NVMe（保留在高速缓存中，不会被清除）",
             "demoteFromNvme": "从 NVMe 降级（从高速缓存中移除）",
-            "unpinFromNvme": "取消固定到 NVMe（可再次被清除）"
+            "unpinFromNvme": "取消固定到 NVMe（可再次被清除）",
+            "openInComfyUI": "在 ComfyUI 中打开",
+            "copyWorkflowToClipboard": "复制工作流到剪贴板"
         },
         "nsfw": {
             "matureContent": "成熟内容",
@@ -265,6 +267,7 @@
             "checkpoints": "Checkpoint",
             "embeddings": "Embedding",
             "other": "其他",
+            "workflows": "工作流",
             "statistics": "统计"
         },
         "search": {
@@ -285,6 +288,7 @@
         },
         "filter": {
             "title": "筛选模型",
+            "countTitle": "{name} —— {count} 个模型",
             "presets": "预设",
             "savePreset": "将当前激活的筛选器保存为新预设。",
             "savePresetDisabledActive": "无法保存：已有预设处于激活状态。修改筛选器后可保存新预设",
@@ -322,7 +326,9 @@
             "loraAvailability": "LoRA 可用性",
             "availabilityReady": "可直接使用",
             "availabilityMissing": "包含缺失 LoRA",
-            "availabilityDeleted": "包含已删除 LoRA"
+            "availabilityDeleted": "包含已删除 LoRA",
+            "workflow": "工作流",
+            "hasWorkflow": "包含工作流"
         },
         "theme": {
             "toggle": "切换主题",
@@ -422,7 +428,8 @@
             "autoOrganize": "自动整理",
             "metadata": "元数据",
             "sidecarStorage": "附属文件存储",
-            "proxySettings": "代理设置"
+            "proxySettings": "代理设置",
+            "sendToWorkflow": "发送到工作流"
         },
         "nav": {
             "general": "通用",
@@ -476,6 +483,18 @@
                 "saveFailed": "无法保存跳过路径：{message}"
             }
         },
+        "sendToWorkflowExclusions": {
+            "nodeClasses": {
+                "label": "排除的节点类型",
+                "placeholder": "示例: CheckpointLoaderSimple, MyCustomNode",
+                "help": "这些 ComfyUI 节点类名永远不会作为发送到工作流的目标出现。多个条目用逗号或分号分隔。在 ComfyUI 中显式标记的节点（右键 → Mark as）不受此限制。"
+            },
+            "titlePatterns": {
+                "label": "排除的节点标题模式",
+                "placeholder": "示例: negative, preview",
+                "help": "标题包含这些文本片段（不区分大小写）的节点不会出现在发送到工作流的目标中。多个条目用逗号或分号分隔。在 ComfyUI 中显式标记的节点（右键 → Mark as）不受此限制。"
+            }
+        },
         "backup": {
             "autoEnabled": "自动备份",
             "autoEnabledHelp": "每天创建一次本地快照，并按保留策略保留最新快照。",
@@ -518,6 +537,42 @@
             },
             "validation": {
                 "saveFailed": "无法保存已排除的基础模型：{message}"
+            }
+        },
+        "downloadRootRules": {
+            "title": "下载根目录规则",
+            "help": "根据模型的基础模型或标签，将下载路由到其他根目录。",
+            "description": "规则按顺序检查，首个命中的规则生效；未匹配的下载使用默认根目录。",
+            "defaultHint": "默认：{root} — 未匹配的下载将保存到这里",
+            "defaultSuffix": "默认",
+            "addBaseModelRule": "基础模型规则",
+            "addTagRule": "标签规则",
+            "removeRule": "移除规则",
+            "moveUp": "上移",
+            "moveDown": "下移",
+            "noRoots": "此模型类型尚未配置根目录。",
+            "matchTypes": {
+                "baseModel": "基础模型",
+                "tag": "标签"
+            },
+            "matchTypeChips": {
+                "baseModel": "BM",
+                "tag": "标签"
+            },
+            "tagPlaceholder": "character, style, realistic",
+            "summary": {
+                "selectBaseModels": "选择基础模型...",
+                "enterTags": "输入标签...",
+                "more": "还有 {count} 项"
+            },
+            "types": {
+                "loras": "LoRA",
+                "checkpoints": "Checkpoint",
+                "unet": "Diffusion Model",
+                "embeddings": "Embedding"
+            },
+            "validation": {
+                "saveFailed": "无法保存下载根目录规则：{message}"
             }
         },
         "skipPreviouslyDownloadedModelVersions": {
@@ -564,6 +619,8 @@
             },
             "showVersionOnCard": "在卡片上显示版本",
             "showVersionOnCardHelp": "在模型卡片上显示或隐藏版本名称",
+            "showQuantizationOnCard": "在卡片上显示量化",
+            "showQuantizationOnCardHelp": "在模型卡片上的版本名称旁显示量化级别（如 Q4_K_M, FP8）",
             "modelCardFooterAction": "模型卡片按钮操作",
             "modelCardFooterActionOptions": {
                 "exampleImages": "打开示例图片",
@@ -580,8 +637,8 @@
             "cardBlurAmountHelp": "调整模型和配方卡片上页眉和页脚叠加层的模糊强度（0 = 无模糊，20 = 最大模糊）。"
         },
         "folderSettings": {
-            "activeLibrary": "活动库",
-            "activeLibraryHelp": "在已配置的库之间切换以更新默认文件夹。更改选择将重新加载页面。",
+            "activeLibrary": "活动库（已弃用）",
+            "activeLibraryHelp": "在已配置的库之间切换以更新默认文件夹。更改选择将重新加载页面。已弃用：多库支持将在即将发布的版本中移除。单个库内的多个文件夹根目录仍完全受支持。",
             "loadingLibraries": "正在加载库...",
             "noLibraries": "尚未配置库",
             "defaultLoraRoot": "LoRA 根目录",
@@ -604,6 +661,10 @@
             "defaultControlnetRootHelp": "设置下载、导入和移动时的默认 ControlNet 根目录",
             "enableOtherModels": "其他模型管理",
             "enableOtherModelsHelp": "关闭后，不会扫描 VAE / Upscaler / Text Encoder / CLIP Vision / ControlNet 文件夹，其他模型页面保持禁用，且无法下载这些模型类型。",
+            "enableWorkflows": "工作流管理",
+            "enableWorkflowsHelp": "关闭后，不会扫描工作流文件夹（folder_paths.workflows），工作流页面保持禁用，且无法关联或下载 CivitAI 的 Workflow 资源。",
+            "workflowFolders": "工作流文件夹",
+            "workflowFoldersHelp": "扫描 ComfyUI 工作流 JSON 文件的文件夹。仅由 LoRA Manager 管理（不与 ComfyUI 共享）；更改立即生效。",
             "otherSubTypes": "管理的模型类型",
             "otherSubTypesHelp": "选择要在其他模型页面中扫描和显示的其他模型类别。",
             "subTypeVae": "VAE",
@@ -657,7 +718,8 @@
                 "text_encoders": "Text Encoder 路径",
                 "clip": "CLIP 路径（旧版）",
                 "clip_vision": "CLIP Vision 路径",
-                "controlnet": "ControlNet 路径"
+                "controlnet": "ControlNet 路径",
+                "workflows": "工作流路径"
             }
         },
         "directoryPicker": {
@@ -862,6 +924,8 @@
             "migrationDeferred": "现有附属文件未迁移。你可以稍后在“设置 → 库 → 附属文件存储”中迁移它们。",
             "confirmToCentralized": "存储模式已更改，但现有的 .metadata.json 附属文件和预览图片不会自动迁移。要现在将它们移入集中存储目录吗？你也可以稍后使用“立即迁移附属文件”按钮完成。",
             "confirmToAlongside": "存储模式已更改，但现有的 .metadata.json 附属文件和预览图片不会自动迁移。要现在将它们移回各自的模型文件旁边吗？你也可以稍后使用“立即迁移附属文件”按钮完成。",
+            "confirmToCentralizedManual": "要现在将现有的 .metadata.json 附属文件和预览图片移入集中存储目录吗？",
+            "confirmToAlongsideManual": "要现在将现有的 .metadata.json 附属文件和预览图片移回各自的模型文件旁边吗？",
             "confirmRelocateRoot": "集中存储目录已更改，但现有的附属文件和预览图片仍在原目录中。要现在将它们移到新目录吗？",
             "effectivePathLabel": "实际存储位置：",
             "openFolderButton": "打开文件夹",
@@ -945,6 +1009,11 @@
                 "downloadsAsc": "[TODO: Translate] Least downloaded",
                 "random": "随机",
                 "randomAction": "随机排序（洗牌）"
+            },
+            "modelType": {
+                "title": "按模型类型筛选",
+                "all": "全部类型",
+                "multiple": "{count} 种类型"
             },
             "refresh": {
                 "title": "刷新模型列表",
@@ -1083,6 +1152,9 @@
     },
     "recipes": {
         "title": "LoRA 配方",
+        "filter": {
+            "countTitle": "{name} —— {count} 个配方"
+        },
         "actions": {
             "sendCheckpoint": "发送到 ComfyUI",
             "sendRecipe": "发送到 ComfyUI",
@@ -1115,7 +1187,8 @@
             "sendWorkflow": "发送工作流到 ComfyUI",
             "sent": "工作流已发送到 ComfyUI",
             "sendFailed": "发送工作流到 ComfyUI 失败",
-            "noWorkflow": "此配方中未找到内嵌工作流"
+            "noWorkflow": "此配方中未找到内嵌工作流",
+            "hasWorkflow": "包含 ComfyUI 工作流"
         },
         "status": {
             "ready": "可直接使用",
@@ -1428,6 +1501,53 @@
             "openSettingsFolder": "打开设置文件夹"
         }
     },
+    "workflows": {
+        "title": "工作流",
+        "contextMenu": {
+            "sendToComfy": "在 ComfyUI 中打开",
+            "updateFromComfy": "从 ComfyUI 更新",
+            "copyWorkflow": "复制工作流",
+            "restoreDownloaded": "恢复已下载版本"
+        },
+        "sendToComfy": {
+            "success": "工作流已发送到 ComfyUI",
+            "failed": "发送工作流失败：{message}"
+        },
+        "restoreDownloaded": {
+            "title": "恢复已下载版本？",
+            "message": "这会丢弃本地修改，并将工作流恢复到下载时的版本。",
+            "confirmButton": "恢复",
+            "restoring": "正在恢复工作流...",
+            "success": "工作流已恢复到已下载版本",
+            "failed": "恢复工作流失败：{message}"
+        },
+        "updateFromComfy": {
+            "success": "已从 ComfyUI 更新工作流",
+            "noChanges": "ComfyUI 中没有需要写回的更改",
+            "cancelled": "更新已取消",
+            "failed": "从 ComfyUI 更新失败：{message}"
+        },
+        "copyWorkflow": {
+            "failed": "复制工作流失败：{message}"
+        },
+        "disabled": {
+            "title": "工作流管理已关闭",
+            "description": "启用后可扫描和管理 ComfyUI 工作流文件，保留其 CivitAI 元数据和预览，并将它们发送到正在运行的 ComfyUI 中。",
+            "enableButton": "启用工作流",
+            "hint": "你可以稍后在“设置 > 库”中再次关闭此功能。",
+            "enableFailed": "启用工作流失败"
+        },
+        "noPaths": {
+            "title": "未找到工作流文件夹",
+            "descriptionStandalone": "工作流管理已开启，但未找到工作流文件夹。请在“设置 → 模型路径”中添加工作流文件夹，然后重启 LoRA Manager。",
+            "hintStandalone": "工作流从 folder_paths.workflows 条目中读取。",
+            "descriptionComfyUI": "工作流管理已开启，但未配置工作流文件夹。请在“设置 → 库”中添加工作流文件夹，然后重新加载此页面。",
+            "hintComfyUI": "工作流存放在独立的库文件夹中（folder_paths.workflows）；不会影响 ComfyUI 内置的工作流列表。",
+            "openSettings": "打开设置",
+            "openModelPaths": "配置模型文件夹",
+            "openSettingsFolder": "打开设置文件夹"
+        }
+    },
     "sidebar": {
         "modelRoot": "根目录",
         "collapseAll": "折叠所有文件夹",
@@ -1459,7 +1579,8 @@
             "notEmptyMessageCount": "该文件夹中仍有 {count} 个模型文件，请先删除或移出这些模型 —— 删除文件夹不会级联删除模型文件。",
             "notEmptyMessageExcluded": "该文件夹中仍有 {count} 个模型文件，其中 {excluded} 个已从模型库中排除。请先在“管理已排除的模型”中取消排除并删除它们 —— 删除文件夹不会级联删除模型文件。",
             "missingTitle": "未找到文件夹",
-            "missingMessage": "该文件夹在磁盘上已不存在，请刷新侧边栏后重试。",
+            "missingMessage": "该文件夹在磁盘上已不存在，你可以将其从列表中移除。",
+            "removeFromList": "从列表中移除",
             "symlinkTitle": "文件夹是符号链接",
             "symlinkMessage": "该文件夹的每一份副本都是符号链接；请在 LoRA Manager 之外删除该链接或其指向的目标。",
             "protectedTitle": "文件夹受保护",
@@ -1481,6 +1602,8 @@
             "busy": "该文件夹内仍有待处理的删除操作，请等待撤销窗口结束。",
             "unsupported": "此页面不支持删除文件夹",
             "missing": "该文件夹在磁盘上已不存在，请刷新侧边栏后重试。",
+            "forgotten": "已将文件夹 \"{name}\" 从列表中移除",
+            "exists": "该文件夹已重新出现在磁盘上，请改为删除它。",
             "symlink": "该文件夹是符号链接，无法从侧边栏中删除。",
             "successMulti": "已从 {count} 个模型根目录中删除文件夹 \"{name}\"",
             "partial": "已删除 {total} 份副本中的 {count} 份 —— {failed} 份无法删除。请刷新侧边栏后重试。"
@@ -1671,6 +1794,10 @@
                 "label": "目标类型：",
                 "tooltip": "根据模型元数据自动检测。如果检测结果有误，请切换；切换会为本次下载关闭“使用默认路径”。"
             },
+            "routedByRule": {
+                "baseModel": "已由规则路由：基础模型“{value}”",
+                "tag": "已由规则路由：标签“{value}”"
+            },
             "targetFolderPath": "目标文件夹路径：",
             "browseFolders": "浏览文件夹：",
             "createNewFolder": "新建文件夹",
@@ -1696,6 +1823,8 @@
             "errors": {
                 "invalidUrl": "无效的模型 URL 格式",
                 "noVersions": "此模型没有可用版本",
+                "linkedFileNotFound": "未在所请求的模型版本中找到文件 {fileId}。",
+                "linkedFileNotWeightFile": "文件 {fileId} 不是可下载的模型文件。",
                 "mixedSources": "无法在同一批次中混合使用 CivitAI 和 Hugging Face / ModelScope URL。",
                 "noModelFiles": "在此仓库中未找到模型文件。"
             },
@@ -1798,7 +1927,8 @@
             "titleToAlongside": "要将附属文件移回模型文件旁边吗？",
             "confirmButton": "立即迁移",
             "titleRelocateRoot": "要将附属文件移到新的存储目录吗？",
-            "destination": "目标位置：{path}"
+            "destination": "目标位置：{path}",
+            "defaultLocationHint": "将使用默认存储位置。如需使用自定义文件夹，请取消，在上方设置存储路径，然后点击“立即迁移附属文件”。"
         },
         "sidecarMigrationResult": {
             "title": "附属文件迁移摘要",
@@ -1944,6 +2074,7 @@
                 "viewOnHuggingFaceText": "在 Hugging Face 查看",
                 "viewCreatorProfile": "查看创作者主页",
                 "openFileLocation": "打开文件位置",
+                "openSidecarLocation": "打开元数据位置",
                 "sendToWorkflow": "发送到 ComfyUI",
                 "sendToWorkflowText": "发送到 ComfyUI",
                 "copyHash": "复制哈希值",
@@ -1954,6 +2085,12 @@
             "openFileLocation": {
                 "success": "文件位置已成功打开",
                 "failed": "打开文件位置失败",
+                "copied": "路径已复制到剪贴板：{{path}}",
+                "clipboardFallback": "路径：{{path}}"
+            },
+            "openSidecarLocation": {
+                "success": "元数据位置已成功打开",
+                "failed": "打开元数据位置失败",
                 "copied": "路径已复制到剪贴板：{{path}}",
                 "clipboardFallback": "路径：{{path}}"
             },
@@ -2190,6 +2327,7 @@
             "statSuccess": "成功",
             "statFailed": "失败",
             "statSkipped": "已跳过",
+            "statOffline": "驱动器离线",
             "statTotal": "总计扫描",
             "statDuration": "耗时",
             "successMessage": "全部 {count} 个 {type} 更新成功！",
@@ -2198,7 +2336,8 @@
             "copyReport": "复制报告",
             "downloadCsv": "下载 CSV",
             "columnModelName": "模型名称",
-            "columnError": "错误"
+            "columnError": "错误",
+            "rateLimitedNotice": "获取已中止：已达到元数据提供方的速率限制。请稍后重新执行“从 CivitAI 获取元数据”，以重试剩余的模型。"
         },
         "downloadBatchSummary": {
             "title": "批量下载摘要",
@@ -2248,6 +2387,10 @@
             "title": "正在初始化其他模型管理器",
             "message": "正在扫描并构建模型缓存。这可能需要几分钟..."
         },
+        "workflows": {
+            "title": "初始化工作流管理器",
+            "message": "正在扫描并构建工作流缓存。这可能需要几分钟..."
+        },
         "recipes": {
             "title": "初始化配方管理器",
             "message": "正在加载和处理配方。这可能需要几分钟..."
@@ -2283,6 +2426,52 @@
                 "description": "按 Ctrl+F（Mac 上为 Cmd+F）可快速在当前视图内搜索。",
                 "alt": "快速搜索"
             }
+        },
+        "error": {
+            "title": "初始化失败",
+            "message": "扫描你的模型库时出错。",
+            "retry": "重试"
+        }
+    },
+    "firstRun": {
+        "title": "欢迎使用 LoRA 管理器",
+        "description": "开始之前，LoRA Manager 需要扫描你的模型库并生成元数据附属文件。这是一次性步骤；耗时取决于模型库的大小和磁盘速度。",
+        "libraries": {
+            "loras": "LoRA",
+            "checkpoints": "Checkpoint",
+            "embeddings": "Embedding",
+            "other": "其他模型"
+        },
+        "language": {
+            "label": "选择语言"
+        },
+        "libraryStats": "{count} 个模型 · {size}",
+        "rootMissing": "未找到目录",
+        "estimate": "约 {count} 个模型（{size}），预计扫描时间约 {minutes} 分钟，具体取决于模型库大小和磁盘速度。",
+        "noRoots": {
+            "plugin": "未找到可访问的模型文件夹。打开设置配置模型目录，然后重新加载此页面。",
+            "standalone": "未找到可访问的模型文件夹。编辑 settings.json 中的 folder_paths，然后重启服务器。"
+        },
+        "sidecar": {
+            "title": "元数据存储",
+            "alongside": {
+                "label": "与模型文件放在一起（推荐）",
+                "description": "元数据 .json 文件与每个模型文件存放在一起，因此会随模型一起移动。"
+            },
+            "centralized": {
+                "label": "集中目录",
+                "description": "元数据存储在单独的目录中，让模型文件夹保持整洁。",
+                "pathPlaceholder": "集中元数据存储目录"
+            }
+        },
+        "actions": {
+            "start": "开始扫描",
+            "defer": "稍后"
+        },
+        "errors": {
+            "loadFailed": "加载模型库信息失败。",
+            "pathRequired": "请输入用于集中存储元数据的目录。",
+            "startFailed": "无法启动扫描。"
         }
     },
     "duplicates": {
@@ -2323,7 +2512,8 @@
             "embeddingAdded": "Embedding 已追加到工作流",
             "embeddingFailed": "添加 Embedding 失败",
             "promptSent": "提示词已发送到工作流",
-            "promptFailed": "提示词发送失败"
+            "promptFailed": "提示词发送失败",
+            "nodeTypeExcluded": "节点类型 \"{type}\" 已从发送目标中排除"
         },
         "nodeSelector": {
             "recipe": "配方",
@@ -2333,7 +2523,8 @@
             "replace": "替换",
             "append": "追加",
             "selectTargetNode": "选择目标节点",
-            "sendToAll": "全部发送"
+            "sendToAll": "全部发送",
+            "excludeNodeType": "不再建议此节点类型"
         },
         "exampleImages": {
             "opened": "示例图片文件夹已打开",
@@ -2801,7 +2992,9 @@
             "noItemsSelected": "未选中要删除的 {type}",
             "deleteError": "错误：{message}",
             "deleteSuccess": "成功删除 {count} 个 {type}",
-            "deleteFailed": "删除 {type} 失败：{message}"
+            "deleteFailed": "删除 {type} 失败：{message}",
+            "deletePartialFailed": "删除 {failed} 个选中的 {type} 失败：{message}",
+            "cacheUpdateFailed": "文件已删除，但无法更新模型库缓存。请运行“重建缓存”刷新列表。"
         },
         "controls": {
             "reloadFailed": "重新加载 {pageType} 失败：{message}",
@@ -2815,7 +3008,7 @@
             "contentRatingFailed": "设置内容评级失败：{message}",
             "relinkSuccess": "模型已成功重新关联到 CivitAI",
             "relinkFailed": "错误：{message}",
-            "linkHfSuccess": "模型已成功链接到 HuggingFace",
+            "linkHfSuccess": "模型已成功关联到其模型来源",
             "linkHfFailed": "错误：{message}",
             "linkCivArchSuccess": "模型已成功通过 CivitArchive 重新关联",
             "fetchMetadataFirst": "请先从 CivitAI 获取元数据",
@@ -2862,6 +3055,7 @@
             "metadataUpdateComplete": "元数据更新完成",
             "operationCancelled": "操作已由用户取消",
             "operationCancelledPartial": "操作已取消。已处理 {success} 个项目。",
+            "metadataFetchRateLimited": "因速率限制，元数据获取已中止——已更新 {total} 个中的 {success} 个，失败 {failed} 个，跳过 {skipped} 个。请稍后重新从 CivitAI 获取元数据，以重试其余模型。",
             "metadataFetchFailed": "获取元数据失败：{message}",
             "bulkMetadataCompleteAll": "全部 {count} 个 {type} 元数据刷新成功",
             "bulkMetadataCompletePartial": "已刷新 {success}/{total} 个 {type} 元数据",
@@ -3001,6 +3195,12 @@
             "content": "在一个专属页面中扫描和管理 VAE、Upscaler、Text Encoder、CLIP Vision 和 ControlNet 文件，并从 CivitAI 下载。",
             "enable": "启用其他模型",
             "openSettings": "打开设置"
+        },
+        "bulkFetchPrompt": {
+            "title": "让你的模型库焕发生机",
+            "content": "首次扫描发现 {count} 个模型缺少元数据。从 CivitAI 获取这些模型的信息，即可获得预览图片、描述和触发词。",
+            "fetch": "获取元数据",
+            "later": "以后再说"
         },
         "pager": {
             "previous": "上一条通知",

@@ -23,6 +23,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import quote
 from typing import Any, Awaitable, Callable, Dict, Mapping, Protocol, Sequence
 
 from aiohttp import web
@@ -33,8 +34,13 @@ from ...services.metadata_service import (
     update_metadata_providers,
 )
 from ...services.service_registry import ServiceRegistry
+from ...services.model_scanner import PAGE_TYPE_MAP
+from ...services.use_cases.bulk_metadata_refresh_use_case import (
+    count_fetch_candidates,
+)
 from ...services.model_lifecycle_service import delete_model_artifacts
 from ...services.settings_manager import get_settings_manager
+from ...services.first_run_manager import get_first_run_manager
 from ...services.websocket_manager import ws_manager
 from ...services.downloader import get_downloader
 from ...services.errors import ResourceNotFoundError
@@ -76,6 +82,7 @@ from ...utils.sidecar_paths import (
     get_configured_sidecar_root,
     get_metadata_path,
     get_preview_dir,
+    get_sidecar_dir,
     get_storage_mode,
     get_unmatched_sidecar_components,
 )
@@ -439,6 +446,35 @@ def _has_gui_display() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
+def _select_in_linux_file_manager(file_path: str) -> bool:
+    """Reveal ``file_path`` selected in the desktop file manager.
+
+    Uses the freedesktop ``org.freedesktop.FileManager1.ShowItems`` DBus
+    interface, which is supported by GNOME Files (Nautilus), KDE Dolphin,
+    Nemo, Caja, and recent Thunar.  Returns ``False`` when the interface is
+    unavailable so the caller can fall back to plain ``xdg-open``.
+    """
+    uri = "file://" + quote(file_path)
+    try:
+        result = subprocess.run(
+            [
+                "dbus-send",
+                "--session",
+                "--print-reply",
+                "--dest=org.freedesktop.FileManager1",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+                f"array:string:{uri}",
+                "string:",
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
+    return result.returncode == 0
+
+
 class PromptServerProtocol(Protocol):
     """Subset of PromptServer used by the handlers."""
 
@@ -586,6 +622,7 @@ class NodeRegistry:
             "widget_names": widget_names,
             "mode": node.get("mode"),
             "marker_role": node.get("marker_role"),
+            "exclude_send": bool(node.get("exclude_send")),
         }
 
     # ------------------------------------------------------------------
@@ -672,51 +709,95 @@ class HealthCheckHandler:
     def __init__(
         self,
         scanner_getters: Mapping[str, Callable[[], Awaitable[Any]]] | None = None,
+        first_run_manager: Any = None,
     ) -> None:
         self._scanner_getters = scanner_getters or {
             "lora": ServiceRegistry.get_lora_scanner,
             "checkpoint": ServiceRegistry.get_checkpoint_scanner,
             "embedding": ServiceRegistry.get_embedding_scanner,
             "other": ServiceRegistry.get_other_scanner,
+            "workflow": ServiceRegistry.get_workflow_scanner,
             "recipe": ServiceRegistry.get_recipe_scanner,
         }
+        self._first_run_manager = first_run_manager
 
     def _active_scanner_getters(
         self,
     ) -> Mapping[str, Callable[[], Awaitable[Any]]]:
-        """Drop the opt-in other scanner while Other Models is disabled."""
-        getters = self._scanner_getters
-        if "other" not in getters:
-            return getters
-        if get_settings_manager().is_other_models_enabled():
-            return getters
-        return {name: getter for name, getter in getters.items() if name != "other"}
+        """Drop the opt-in scanners while their features are disabled."""
+        settings = get_settings_manager()
+        active = dict(self._scanner_getters)
+        if not settings.is_other_models_enabled():
+            active.pop("other", None)
+        if not settings.is_workflows_enabled():
+            active.pop("workflow", None)
+        return active
 
     async def health_check(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
+    # Page path segment -> scanner names that page's initialization view
+    # waits for. The WebSocket progress channel already completes per page
+    # (each scanner broadcast carries its pageType), so the polling fallback
+    # scopes itself the same way instead of waiting for every scanner.
+    _PAGE_SCANNER_NAMES: Mapping[str, tuple[str, ...]] = {
+        "loras": ("lora",),
+        "checkpoints": ("checkpoint",),
+        "embeddings": ("embedding",),
+        "other": ("other",),
+        "workflows": ("workflow",),
+        "recipes": ("recipe",),
+    }
+
     async def get_init_status(self, request: web.Request) -> web.Response:
-        """Report aggregate scanner initialization status.
+        """Report scanner initialization status for the requesting page.
 
         Used by the initialization page's polling fallback when the
-        /ws/init-progress WebSocket is unavailable. Omits pageType so every
-        page accepts the update and only reloads once all scanners are done.
+        /ws/init-progress WebSocket is unavailable. ``?page=<pageType>``
+        scopes the check to that page's scanner(s), mirroring the WebSocket
+        completion semantics; without it every active scanner must be done.
+        Omits pageType so every page accepts the update.
         """
+        if (
+            self._first_run_manager is not None
+            and self._first_run_manager.is_awaiting_first_scan()
+        ):
+            return web.json_response(
+                {
+                    "status": "awaiting_first_scan",
+                    "details": "Waiting for the initial scan to be confirmed.",
+                }
+            )
+
+        page = (request.query.get("page") or "").strip().lower()
+        scanner_names = self._PAGE_SCANNER_NAMES.get(page)
+
         pending: list[str] = []
+        errors: list[str] = []
         for name, getter in self._active_scanner_getters().items():
+            if scanner_names is not None and name not in scanner_names:
+                continue
             try:
                 scanner = await getter()
             except Exception:
                 pending.append(name)
                 continue
-            cache_ready = getattr(scanner, "_cache", None) is not None
             is_initializing = getattr(scanner, "is_initializing", None)
             busy = (
                 is_initializing()
                 if callable(is_initializing)
                 else bool(getattr(scanner, "_is_initializing", False))
             )
-            if busy or not cache_ready:
+            if busy:
+                pending.append(name)
+                continue
+            # A failed initial scan leaves an empty cache behind, so the
+            # cache-ready check alone would report it as "complete".
+            init_error = getattr(scanner, "_init_error", None)
+            if init_error:
+                errors.append(f"{name}: {init_error}")
+                continue
+            if getattr(scanner, "_cache", None) is None:
                 pending.append(name)
 
         if pending:
@@ -727,6 +808,13 @@ class HealthCheckHandler:
                     "details": "Initializing: " + ", ".join(pending),
                 }
             )
+        if errors:
+            return web.json_response(
+                {
+                    "status": "error",
+                    "details": "Initialization failed: " + "; ".join(errors),
+                }
+            )
         return web.json_response(
             {
                 "status": "complete",
@@ -734,6 +822,97 @@ class HealthCheckHandler:
                 "details": "Initialization complete",
             }
         )
+
+    async def get_metadata_fetch_candidates(
+        self, request: web.Request
+    ) -> web.Response:
+        """GET /api/lm/metadata-fetch-candidates.
+
+        Count of cached models eligible for a bulk metadata fetch, per page
+        type. Backs the one-shot post-first-scan fetch prompt, so the numbers
+        must match what the refresh use case would actually process (both
+        share ``count_fetch_candidates``). Read-only: only inspects the
+        in-memory cache and never triggers a scan — a scanner without a cache
+        yet simply contributes zero. Recipes are excluded (no bulk fetch).
+        """
+        settings = get_settings_manager()
+        counts: Dict[str, int] = {}
+        for name, getter in self._active_scanner_getters().items():
+            page_type = PAGE_TYPE_MAP.get(name)
+            if page_type is None:
+                continue
+            try:
+                scanner = await getter()
+            except Exception:
+                counts[page_type] = 0
+                continue
+            cache = getattr(scanner, "_cache", None)
+            raw_data = getattr(cache, "raw_data", None) if cache is not None else None
+            if not raw_data:
+                counts[page_type] = 0
+                continue
+            counts[page_type] = count_fetch_candidates(raw_data, settings=settings)
+        return web.json_response({"success": True, "counts": counts})
+
+
+class FirstRunHandler:
+    """Serve the first-run welcome page and kick off the gated initial scan."""
+
+    def __init__(self, first_run_manager: Any = None) -> None:
+        self._manager = first_run_manager or get_first_run_manager()
+
+    async def get_first_run_info(self, request: web.Request) -> web.Response:
+        """GET /api/lm/first-run-info — roots, sizes and scan estimate."""
+        if not self._manager.is_awaiting_first_scan():
+            return web.json_response({"status": "completed"})
+        info = await self._manager.collect_first_run_info()
+        payload = {"status": "awaiting_first_scan"}
+        payload.update(info)
+        return web.json_response(payload)
+
+    async def start_first_scan(self, request: web.Request) -> web.Response:
+        """POST (or GET, for the browser extension) /api/lm/first-scan/start."""
+        data: Dict[str, Any] = {}
+        if request.method == "POST":
+            try:
+                body = await request.json()
+                if isinstance(body, dict):
+                    data.update(body)
+            except Exception:
+                # Empty or non-JSON body: fall back to query parameters.
+                pass
+        for key in ("sidecar_storage_mode", "sidecar_storage_path", "defer"):
+            if key in request.query:
+                data[key] = request.query[key]
+
+        defer = _parse_bool_param(data.get("defer", False))
+        try:
+            result = await self._manager.start_initial_scan(
+                sidecar_storage_mode=data.get("sidecar_storage_mode"),
+                sidecar_storage_path=data.get("sidecar_storage_path"),
+                defer=defer,
+            )
+        except ValueError as exc:
+            return web.json_response(
+                {"success": False, "error": str(exc)}, status=400
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.error(
+                "Error starting first scan: %s", exc, exc_info=True
+            )
+            return web.json_response(
+                {"success": False, "error": str(exc)}, status=500
+            )
+        return web.json_response({"success": True, **result})
+
+
+def _parse_bool_param(value: Any) -> bool:
+    """Tolerantly parse a boolean from JSON or query-string input."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 class SupportersHandler:
@@ -789,6 +968,7 @@ class DoctorHandler:
                 ("checkpoint", "Checkpoints", ServiceRegistry.get_checkpoint_scanner),
                 ("embedding", "Embeddings", ServiceRegistry.get_embedding_scanner),
                 ("other", "Other Models", ServiceRegistry.get_other_scanner),
+                ("workflow", "Workflows", ServiceRegistry.get_workflow_scanner),
             )
         )
         self._app_version_getter = app_version_getter
@@ -796,10 +976,13 @@ class DoctorHandler:
     def _active_scanner_factories(
         self,
     ) -> Sequence[tuple[str, str, Callable[[], Awaitable[Any]]]]:
-        """Drop the opt-in other scanner while Other Models is disabled."""
-        if self._settings.is_other_models_enabled():
-            return self._scanner_factories
-        return tuple(entry for entry in self._scanner_factories if entry[0] != "other")
+        """Drop the opt-in scanners while their features are disabled."""
+        factories = self._scanner_factories
+        if not self._settings.is_other_models_enabled():
+            factories = tuple(entry for entry in factories if entry[0] != "other")
+        if not self._settings.is_workflows_enabled():
+            factories = tuple(entry for entry in factories if entry[0] != "workflow")
+        return factories
 
     async def get_doctor_diagnostics(self, request: web.Request) -> web.Response:
         try:
@@ -1676,6 +1859,15 @@ class SettingsHandler:
                 response_data["other_models_paths_available"] = None
             standalone_mode = os.environ.get("LORA_MANAGER_STANDALONE", "0") == "1"
             response_data["standalone_mode"] = standalone_mode
+            # Workflow roots are LoRA-Manager-only in BOTH modes (the ComfyUI
+            # host has no such folder category), so expose them to the
+            # settings UI regardless of standalone_mode.
+            get_workflow_paths = getattr(
+                self._settings, "get_workflow_folder_paths", None
+            )
+            response_data["workflow_folder_paths"] = (
+                get_workflow_paths() if get_workflow_paths else []
+            )
             if standalone_mode:
                 # Standalone reads its model roots exclusively from
                 # settings.json, so the Model Paths settings UI needs the
@@ -1782,6 +1974,14 @@ class SettingsHandler:
             proxy_changed = False
 
             for key, value in data.items():
+                if key == "workflow_folder_paths":
+                    # Pseudo-key: replaces only the workflows entry of the
+                    # active library's folder_paths (core keys are host-owned
+                    # in plugin mode and must not be clobbered), then applies
+                    # the new roots live without a restart.
+                    self._settings.set_workflow_folder_paths(value)
+                    continue
+
                 if value == self._settings.get(key):
                     continue
 
@@ -2242,6 +2442,7 @@ class ServiceRegistryAdapter:
     get_downloaded_version_history_service: Callable[[], Awaitable[Any]]
     get_backup_service: Callable[[], Awaitable[Any]] = _noop_backup_service
     get_other_scanner: Callable[[], Awaitable[Any]] = ServiceRegistry.get_other_scanner
+    get_workflow_scanner: Callable[[], Awaitable[Any]] = ServiceRegistry.get_workflow_scanner
 
 
 class ModelLibraryHandler:
@@ -2268,6 +2469,8 @@ class ModelLibraryHandler:
             return "embedding"
         if normalized in VALID_OTHER_CIVITAI_TYPES:
             return "other"
+        if normalized in {"workflow", "workflows", "comfyworkflows"}:
+            return "workflow"
         return None
 
     async def _get_scanner_for_type(self, model_type: str | None):
@@ -2285,6 +2488,11 @@ class ModelLibraryHandler:
             if not get_settings_manager().is_other_models_enabled():
                 return None, None
             return normalized_type, await self._service_registry.get_other_scanner()
+        if normalized_type == "workflow":
+            # Same opt-in posture as other models.
+            if not get_settings_manager().is_workflows_enabled():
+                return None, None
+            return normalized_type, await self._service_registry.get_workflow_scanner()
         return None, None
 
     async def _get_download_history_service(self):
@@ -2881,9 +3089,10 @@ class ModelLibraryHandler:
 
             try:
                 response = await metadata_provider.get_model_versions(model_id)
-            except ResourceNotFoundError:
+            except ResourceNotFoundError as exc:
                 return web.json_response(
-                    {"success": False, "error": "Model not found"}, status=404
+                    {"success": False, "error": str(exc) or "Model not found"},
+                    status=404,
                 )
             if not response or not response.get("modelVersions"):
                 return web.json_response(
@@ -3466,6 +3675,63 @@ class FileSystemHandler:
             {"success": True, "message": f"Opened folder: {path}", "path": path}
         )
 
+    async def _reveal_file(self, file_path: str) -> web.Response:
+        """Open the platform file manager with ``file_path`` selected."""
+        if os.name == "nt":
+            subprocess.Popen(["explorer", "/select,", file_path])
+        elif os.name == "posix":
+            if _is_docker():
+                return web.json_response(
+                    {
+                        "success": True,
+                        "message": "Running in Docker: Path available for copying",
+                        "path": file_path,
+                        "mode": "clipboard",
+                    }
+                )
+            elif _is_wsl():
+                windows_path = _wsl_to_windows_path(file_path)
+                if windows_path:
+                    subprocess.Popen(["explorer.exe", "/select,", windows_path])
+                else:
+                    logger.error(
+                        "Failed to convert WSL path to Windows path: %s", file_path
+                    )
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": "Failed to open file location: path conversion error",
+                        },
+                        status=500,
+                    )
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", file_path])
+            else:
+                if not _has_gui_display():
+                    # Headless/SSH session: no file manager to open, so
+                    # hand the path to the browser for copying instead
+                    # of reporting a success that never happened.
+                    return web.json_response(
+                        {
+                            "success": True,
+                            "message": "Headless session: path available for copying",
+                            "path": file_path,
+                            "mode": "clipboard",
+                        }
+                    )
+                selected = _select_in_linux_file_manager(file_path)
+                if not selected:
+                    folder = os.path.dirname(file_path)
+                    subprocess.Popen(["xdg-open", folder])
+
+        return web.json_response(
+            {
+                "success": True,
+                "message": f"Opened folder and selected file: {file_path}",
+                "path": file_path,
+            }
+        )
+
     async def open_file_location(self, request: web.Request) -> web.Response:
         try:
             data = await request.json()
@@ -3481,47 +3747,47 @@ class FileSystemHandler:
                     {"success": False, "error": "File does not exist"}, status=404
                 )
 
-            if os.name == "nt":
-                subprocess.Popen(["explorer", "/select,", file_path])
-            elif os.name == "posix":
-                if _is_docker():
-                    return web.json_response(
-                        {
-                            "success": True,
-                            "message": "Running in Docker: Path available for copying",
-                            "path": file_path,
-                            "mode": "clipboard",
-                        }
-                    )
-                elif _is_wsl():
-                    windows_path = _wsl_to_windows_path(file_path)
-                    if windows_path:
-                        subprocess.Popen(["explorer.exe", "/select,", windows_path])
-                    else:
-                        logger.error(
-                            "Failed to convert WSL path to Windows path: %s", file_path
-                        )
-                        return web.json_response(
-                            {
-                                "success": False,
-                                "error": "Failed to open file location: path conversion error",
-                            },
-                            status=500,
-                        )
-                elif sys.platform == "darwin":
-                    subprocess.Popen(["open", "-R", file_path])
-                else:
-                    folder = os.path.dirname(file_path)
-                    subprocess.Popen(["xdg-open", folder])
-
-            return web.json_response(
-                {
-                    "success": True,
-                    "message": f"Opened folder and selected file: {file_path}",
-                }
-            )
+            return await self._reveal_file(file_path)
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.error("Failed to open file location: %s", exc, exc_info=True)
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+    async def open_model_sidecar_location(self, request: web.Request) -> web.Response:
+        """Reveal the model's ``.metadata.json`` sidecar in the file manager.
+
+        Sidecar/preview path derivation must go through
+        :mod:`py.utils.sidecar_paths` so centralized storage mode resolves to
+        the mirror tree.  When the sidecar has not been written yet, the
+        containing sidecar directory is opened instead.
+        """
+        try:
+            data = await request.json()
+            file_path = data.get("file_path")
+            if not file_path:
+                return web.json_response(
+                    {"success": False, "error": "Missing file_path parameter"},
+                    status=400,
+                )
+            file_path = os.path.abspath(file_path)
+            if not os.path.isfile(file_path):
+                return web.json_response(
+                    {"success": False, "error": "File does not exist"}, status=404
+                )
+
+            metadata_path = get_metadata_path(file_path)
+            if os.path.isfile(metadata_path):
+                return await self._reveal_file(metadata_path)
+
+            sidecar_dir = get_sidecar_dir(file_path)
+            if os.path.isdir(sidecar_dir):
+                return await self._open_path(sidecar_dir)
+
+            return web.json_response(
+                {"success": False, "error": "Sidecar does not exist yet"},
+                status=404,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error("Failed to open sidecar location: %s", exc, exc_info=True)
             return web.json_response({"success": False, "error": str(exc)}, status=500)
 
     async def open_settings_location(self, request: web.Request) -> web.Response:
@@ -4341,6 +4607,7 @@ class MiscHandlerSet:
         agent_handler: Any = None,
         download_routing: Any = None,
         sidecar_migration: Any = None,
+        first_run: Any = None,
     ) -> None:
         self.health = health
         self.settings = settings
@@ -4363,6 +4630,7 @@ class MiscHandlerSet:
         self.agent_handler = agent_handler
         self.download_routing = download_routing
         self.sidecar_migration = sidecar_migration
+        self.first_run = first_run
 
     def to_route_mapping(
         self,
@@ -4370,6 +4638,7 @@ class MiscHandlerSet:
         return {
             "health_check": self.health.health_check,
             "get_init_status": self.health.get_init_status,
+            "get_metadata_fetch_candidates": self.health.get_metadata_fetch_candidates,
             "get_settings": self.settings.get_settings,
             "update_settings": self.settings.update_settings,
             "get_doctor_diagnostics": self.doctor.get_doctor_diagnostics,
@@ -4409,6 +4678,7 @@ class MiscHandlerSet:
             "open_backup_location": self.filesystem.open_backup_location,
             "open_wildcards_location": self.filesystem.open_wildcards_location,
             "open_sidecar_location": self.filesystem.open_sidecar_location,
+            "open_model_sidecar_location": self.filesystem.open_model_sidecar_location,
             "browse_directory": self.filesystem.browse_directory,
             "validate_path": self.filesystem.validate_path,
             "search_custom_words": self.custom_words.search_custom_words,
@@ -4432,6 +4702,9 @@ class MiscHandlerSet:
             "get_download_routing": self.download_routing.get_download_routing,
             # Sidecar migration handler
             "migrate_sidecars": self.sidecar_migration.migrate_sidecars,
+            # First-run welcome page handlers
+            "get_first_run_info": self.first_run.get_first_run_info,
+            "start_first_scan": self.first_run.start_first_scan,
             # Base model handlers
             "get_base_models": self.base_model.get_base_models,
             "refresh_base_models": self.base_model.refresh_base_models,

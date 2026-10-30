@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import os
 
 from py.utils.metadata_manager import MetadataManager
 from py.utils.models import LoraMetadata
@@ -59,7 +60,7 @@ async def test_load_metadata_payload_restores_file_facts_when_sidecar_missing(
     payload = await MetadataManager.load_metadata_payload(str(model_path))
 
     stat_result = model_path.stat()
-    assert payload["file_path"] == str(model_path)
+    assert payload["file_path"] == str(model_path).replace(os.sep, "/")
     assert payload["file_name"] == "MyModel"
     assert payload["size"] == stat_result.st_size
     assert payload["modified"] == stat_result.st_mtime
@@ -174,7 +175,7 @@ async def test_load_metadata_payload_tolerates_missing_model_file(tmp_path) -> N
     """A nonexistent model file must not crash payload loading."""
     missing_path = tmp_path / "Ghost.safetensors"
     payload = await MetadataManager.load_metadata_payload(str(missing_path))
-    assert payload["file_path"] == str(missing_path)
+    assert payload["file_path"] == str(missing_path).replace(os.sep, "/")
     assert "file_name" not in payload
     assert "size" not in payload
     assert "modified" not in payload
@@ -254,3 +255,19 @@ async def test_provenance_fields_survive_a_load_save_round_trip(tmp_path) -> Non
     saved = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert saved["llm_confidence"] == "medium"
     assert saved["llm_enriched_at"] == "2026-01-01T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_create_default_metadata_ignores_an_empty_model_file(tmp_path) -> None:
+    """A zero-byte model must not get a sidecar carrying the empty-string hash.
+
+    Regression test for issue #1162: every unread/unfinished file hashes to the
+    same placeholder, so accepting it turns the library into one bogus
+    duplicate group and resolves it against polluted remote entries.
+    """
+    model_path = tmp_path / "Emilia(RE0).safetensors"
+    model_path.write_bytes(b"")
+
+    assert await MetadataManager.create_default_metadata(str(model_path)) is None
+    assert not (tmp_path / "Emilia(RE0).safetensors.metadata.json").exists()
+

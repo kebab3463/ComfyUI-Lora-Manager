@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 from ..metadata_sync_service import MetadataSyncService
+from ..model_scanner import _normalized_root_prefix, _path_matches_prefix
 from ..model_sources import has_external_source
 from ...utils.metadata_manager import MetadataManager
 
@@ -16,6 +17,72 @@ class MetadataRefreshProgressReporter(Protocol):
 
     async def on_progress(self, payload: Dict[str, Any]) -> None:
         """Handle a metadata refresh progress update."""
+
+
+def _is_in_skip_path(folder: str, skip_paths: Sequence[str]) -> bool:
+    if not skip_paths or not folder:
+        return False
+    normalized = folder.replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+    for sp in skip_paths:
+        nsp = sp.replace("\\", "/").strip("/")
+        if not nsp:
+            continue
+        if normalized == nsp or normalized.startswith(nsp + "/"):
+            return True
+    return False
+
+
+def is_fetch_candidate(
+    model: Dict[str, Any],
+    *,
+    skip_paths: Sequence[str],
+    enable_metadata_archive_db: bool,
+) -> bool:
+    """Whether a cached model qualifies for a bulk metadata fetch.
+
+    Shared by the refresh itself and the count endpoint behind the
+    post-first-scan fetch prompt, so the advertised number matches what a
+    fetch would actually process.
+    """
+    if model.get("skip_metadata_refresh", False):
+        return False
+    if _is_in_skip_path(model.get("folder", ""), skip_paths):
+        return False
+    if model.get("civitai") and model["civitai"].get("id"):
+        return False
+    # Skip models linked to an external model site (Hugging Face /
+    # ModelScope / TensorArt) — they are not on CivitAI / CivArchive.
+    # Users can still refresh them individually via the right-click
+    # context menu.
+    if has_external_source(model):
+        return False
+    # Skip models confirmed not on CivitAI when no need to retry.
+    if (
+        model.get("from_civitai") is False
+        and model.get("civitai_deleted") is True
+        and (not enable_metadata_archive_db or model.get("db_checked", False))
+    ):
+        return False
+    return True
+
+
+def count_fetch_candidates(
+    raw_data: Sequence[Dict[str, Any]], *, settings: Any
+) -> int:
+    """Count cached models eligible for a bulk metadata fetch."""
+    skip_paths = settings.get("metadata_refresh_skip_paths", [])
+    enable_metadata_archive_db = settings.get("enable_metadata_archive_db", False)
+    return sum(
+        1
+        for model in raw_data
+        if is_fetch_candidate(
+            model,
+            skip_paths=skip_paths,
+            enable_metadata_archive_db=enable_metadata_archive_db,
+        )
+    )
 
 
 class BulkMetadataRefreshUseCase:
@@ -46,27 +113,35 @@ class BulkMetadataRefreshUseCase:
 
         enable_metadata_archive_db = self._settings.get("enable_metadata_archive_db", False)
         skip_paths = self._settings.get("metadata_refresh_skip_paths", [])
-        to_process: Sequence[Dict[str, Any]] = [
+        eligible: Sequence[Dict[str, Any]] = [
             model
             for model in cache.raw_data
-            if not model.get("skip_metadata_refresh", False)
-            and not self._is_in_skip_path(model.get("folder", ""), skip_paths)
-            and (not model.get("civitai") or not model["civitai"].get("id"))
-            # Skip models linked to an external model site (Hugging Face /
-            # ModelScope / TensorArt) — they are not on CivitAI / CivArchive.
-            # Users can still refresh them individually via the right-click
-            # context menu.
-            and not has_external_source(model)
-            and not (
-                # Skip models confirmed not on CivitAI when no need to retry
-                model.get("from_civitai") is False
-                and model.get("civitai_deleted") is True
-                and (
-                    not enable_metadata_archive_db
-                    or model.get("db_checked", False)
-                )
+            if is_fetch_candidate(
+                model,
+                skip_paths=skip_paths,
+                enable_metadata_archive_db=enable_metadata_archive_db,
             )
         ]
+
+        # Models on a drive that cannot be read right now stay in the cache
+        # (scoped scan keeps them), but fetching their metadata would only
+        # spend CivitAI rate limit on sidecar/preview writes that cannot land.
+        offline_roots = self._offline_root_details()
+        if offline_roots:
+            to_process = [
+                model
+                for model in eligible
+                if not self._is_under_offline_root(model.get("file_path", ""), offline_roots)
+            ]
+        else:
+            to_process = list(eligible)
+        offline_skipped = len(eligible) - len(to_process)
+        if offline_skipped:
+            self._logger.info(
+                "Bulk metadata refresh: %d model(s) skipped, drive offline: %s",
+                offline_skipped,
+                ", ".join(root["label"] for root in offline_roots),
+            )
 
         total_to_process = len(to_process)
         initial_skipped = total_models - total_to_process  # models excluded from fetch queue
@@ -90,14 +165,21 @@ class BulkMetadataRefreshUseCase:
                 "success": success,
                 "failure_count": len(failures),
                 "skipped_count": skipped_count,
+                "offline_skipped": offline_skipped,
                 "handled": handled_count,
                 "elapsed_seconds": int(time.monotonic() - start_time),
             }
             # Only include full failure details in terminal emits (completed,
             # cancelled, rate_limited) to avoid serializing the list on every
             # per-model progress update.
-            if failures and status in ("completed", "cancelled", "rate_limited"):
-                payload["failures"] = failures
+            if status in ("completed", "cancelled", "rate_limited"):
+                if failures:
+                    payload["failures"] = failures
+                if offline_roots:
+                    payload["offline_roots"] = [
+                        {"path": root["path"], "label": root["label"]}
+                        for root in offline_roots
+                    ]
             payload.update(extra)
             await progress_callback.on_progress(payload)
 
@@ -110,7 +192,7 @@ class BulkMetadataRefreshUseCase:
             if self._service.scanner.is_cancelled():
                 self._logger.info("Bulk metadata refresh cancelled by user")
                 await emit("cancelled", processed=processed, success=success)
-                return {"success": False, "message": "Operation cancelled", "processed": processed, "updated": success, "total": total_models, "failures": failures, "failure_count": len(failures), "skipped_count": skipped_count, "elapsed_seconds": int(time.monotonic() - start_time)}
+                return {"success": False, "message": "Operation cancelled", "processed": processed, "updated": success, "total": total_models, "failures": failures, "failure_count": len(failures), "skipped_count": skipped_count, "offline_skipped": offline_skipped, "elapsed_seconds": int(time.monotonic() - start_time)}
             try:
                 original_name = model.get("model_name")
 
@@ -202,6 +284,7 @@ class BulkMetadataRefreshUseCase:
                         "failures": failures,
                         "failure_count": len(failures),
                         "skipped_count": skipped_count,
+                        "offline_skipped": offline_skipped,
                         "elapsed_seconds": int(time.monotonic() - start_time),
                     }
 
@@ -237,23 +320,58 @@ class BulkMetadataRefreshUseCase:
             "Successfully updated "
             f"{success} of {processed} processed {self._service.model_type}s (total: {total_models})"
         )
+        if offline_skipped:
+            message += (
+                f"; {offline_skipped} skipped, drive offline ("
+                + ", ".join(root["label"] for root in offline_roots)
+                + ")"
+            )
 
-        return {"success": True, "message": message, "processed": processed, "updated": success, "total": total_models, "failures": failures, "failure_count": len(failures), "skipped_count": skipped_count, "elapsed_seconds": int(time.monotonic() - start_time)}
+        return {"success": True, "message": message, "processed": processed, "updated": success, "total": total_models, "failures": failures, "failure_count": len(failures), "skipped_count": skipped_count, "offline_skipped": offline_skipped, "elapsed_seconds": int(time.monotonic() - start_time)}
+
+    def _offline_root_details(self) -> List[Dict[str, str]]:
+        """Configured roots whose directory cannot be read right now.
+
+        Uses the scanner's root description (live ``os.path.exists`` per root),
+        so both a drive switched off at startup and one unplugged mid-session
+        are covered. Root probing must never break a fetch: any failure yields
+        an empty list, which disables the offline filter.
+        """
+        describe = getattr(self._service.scanner, "describe_model_roots", None)
+        if describe is None:
+            return []
+        try:
+            details = describe()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._logger.debug("Failed to describe model roots: %s", exc)
+            return []
+
+        offline: List[Dict[str, str]] = []
+        for detail in details:
+            if not isinstance(detail, dict) or detail.get("reachable", True):
+                continue
+            path = detail.get("path") or ""
+            if not path:
+                continue
+            offline.append(
+                {
+                    "path": path,
+                    "label": detail.get("label") or path,
+                    "prefix": _normalized_root_prefix(path),
+                }
+            )
+        return offline
 
     @staticmethod
-    def _is_in_skip_path(folder: str, skip_paths: List[str]) -> bool:
-        if not skip_paths or not folder:
+    def _is_under_offline_root(
+        file_path: str, offline_roots: Sequence[Dict[str, str]]
+    ) -> bool:
+        """Match a cached business path against offline root prefixes."""
+        if not file_path:
             return False
-        normalized = folder.replace("\\", "/").strip("/")
-        if not normalized:
-            return False
-        for sp in skip_paths:
-            nsp = sp.replace("\\", "/").strip("/")
-            if not nsp:
-                continue
-            if normalized == nsp or normalized.startswith(nsp + "/"):
-                return True
-        return False
+        return any(
+            _path_matches_prefix(file_path, root["prefix"]) for root in offline_roots
+        )
 
     async def execute_with_error_handling(
         self,

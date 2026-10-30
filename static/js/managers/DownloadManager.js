@@ -9,7 +9,7 @@ import { getStorageItem, setStorageItem } from '../utils/storageHelpers.js';
 import { FolderTreeManager } from '../components/FolderTreeManager.js';
 import { translate } from '../utils/i18nHelpers.js';
 import { MODEL_SUBTYPE_DISPLAY_NAMES } from '../utils/constants.js';
-import { buildCivitaiUrl, extractCivitaiModelUrlParts, normalizeCivitaiPageHost } from '../utils/civitaiUtils.js';
+import { buildCivitaiUrl, extractCivitaiModelUrlParts, normalizeCivitaiPageHost, isSupportedCivitaiPageHost } from '../utils/civitaiUtils.js';
 import { formatFileSize } from '../utils/formatters.js';
 import { showDownloadBatchSummary } from '../components/DownloadBatchSummaryModal.js';
 import { openOtherModelsSettings } from '../utils/otherModels.js';
@@ -37,6 +37,12 @@ export class DownloadManager {
         // Manual checkpoint/diffusion root override on the location step:
         // null follows the auto classification, true/false is user-picked.
         this._routingOverride = null;
+        // Root resolved by download_root_rules for the current version
+        // (null = no rule matched; the default root is preselected).
+        this._resolvedRoot = null;
+        // The download_root_rules rule that matched, for the location-step
+        // "routed by rule" hint ({match_type, match} or null).
+        this._matchedRule = null;
 
         // Multi-file selection state: selectedFile stays the first selected
         // file for backward compatibility with single-file flows (#1058).
@@ -219,9 +225,12 @@ export class DownloadManager {
     }
 
     async validateAndFetchVersions() {
+        this.selectedFile = null;
+        this.selectedFiles = [];
         const rawText = document.getElementById('modelUrl').value.trim();
         const errorElement = document.getElementById('urlError');
         const urls = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+        errorElement.textContent = '';
 
         if (urls.length === 0) {
             errorElement.textContent = translate('modals.download.errors.invalidUrl');
@@ -258,7 +267,10 @@ export class DownloadManager {
             try {
                 this.loadingManager.showSimpleLoading(translate('modals.download.fetchingVersions'));
 
-                this.modelId = this.extractModelId(urls[0]);
+                const parsed = await this.resolveModelUrl(urls[0]);
+                this.modelId = parsed.modelId;
+                this.modelVersionId = parsed.modelVersionId;
+                this.source = parsed.source;
                 if (!this.modelId) {
                     throw new Error(translate('modals.download.errors.invalidUrl'));
                 }
@@ -272,7 +284,17 @@ export class DownloadManager {
                     this.currentVersion = this.versions[0];
                 }
 
+                if (!this.currentVersion && DownloadManager.parseDownloadUrl(urls[0])) {
+                    throw new Error(translate('modals.download.errors.noVersions'));
+                }
+                const linkedFile = this.getLinkedFile(this.currentVersion, parsed.fileId);
                 this.showVersionStep();
+                if (linkedFile) {
+                    this.showFileSelectionStep(this.currentVersion.id);
+                    const checkbox = document.querySelector(`#fileSelectionList input[value="${linkedFile.id}"]`);
+                    if (checkbox && !checkbox.disabled) checkbox.checked = true;
+                    this._syncFileSelectionState();
+                }
             } catch (error) {
                 errorElement.textContent = error.message;
             } finally {
@@ -286,10 +308,17 @@ export class DownloadManager {
         this.batchModels = [];
         errorElement.textContent = '';
 
+        this.loadingManager.showSimpleLoading(translate('modals.download.fetchingVersions'));
         const seen = new Set();
         const parsed = [];
         for (const url of urls) {
-            const result = DownloadManager.parseModelUrl(url);
+            let result;
+            try {
+                result = await this.resolveModelUrl(url);
+            } catch (error) {
+                parsed.push({ url, error: error.message });
+                continue;
+            }
             if (!result.modelId) {
                 parsed.push({ url, error: translate('modals.download.errors.invalidUrl') });
                 continue;
@@ -299,17 +328,17 @@ export class DownloadManager {
             const dedupKey = result.modelVersionId
                 ? `${result.modelId}:${result.modelVersionId}`
                 : result.modelId;
-            if (seen.has(dedupKey)) continue;
-            seen.add(dedupKey);
+            const fileKey = result.fileId ? `${dedupKey}:${result.fileId}` : dedupKey;
+            if (seen.has(fileKey)) continue;
+            seen.add(fileKey);
             parsed.push({ url, ...result, error: null });
         }
 
         if (parsed.length === 0) {
+            this.loadingManager.hide();
             errorElement.textContent = translate('modals.download.errors.invalidUrl');
             return;
         }
-
-        this.loadingManager.showSimpleLoading(translate('modals.download.fetchingVersions'));
 
         let fetched = 0;
         const total = parsed.filter(p => !p.error).length;
@@ -329,13 +358,18 @@ export class DownloadManager {
                 let selectedVersion = null;
                 if (versions && versions.length > 0) {
                     if (item.modelVersionId) {
-                        selectedVersion = versions.find(v => v.id.toString() === item.modelVersionId) || versions[0];
+                        selectedVersion = versions.find(v => v.id.toString() === item.modelVersionId);
+                        if (!selectedVersion && DownloadManager.parseDownloadUrl(item.url)) {
+                            throw new Error(translate('modals.download.errors.noVersions'));
+                        }
+                        selectedVersion ||= versions[0];
                     } else {
                         selectedVersion = versions[0];
                     }
                 }
 
-                this.batchModels[index] = { ...item, versions: versions || [], selectedVersion };
+                const selectedFile = this.getLinkedFile(selectedVersion, item.fileId);
+                this.batchModels[index] = { ...item, versions: versions || [], selectedVersion, selectedFile };
             } catch (err) {
                 this.batchModels[index] = { ...item, versions: [], selectedVersion: null, error: err.message };
             }
@@ -491,6 +525,44 @@ export class DownloadManager {
         }
     }
 
+    static parseDownloadUrl(url) {
+        try {
+            const parsed = new URL(url);
+            if (!['http:', 'https:'].includes(parsed.protocol)
+                || !isSupportedCivitaiPageHost(parsed.hostname)) return null;
+            const match = parsed.pathname.match(/^\/api\/download\/models\/(\d+)\/?$/);
+            if (!match) return null;
+            const fileId = parsed.searchParams.get('fileId');
+            if (fileId !== null && !/^\d+$/.test(fileId)) return null;
+            return { modelVersionId: match[1], fileId };
+        } catch {
+            return null;
+        }
+    }
+
+    async resolveModelUrl(url) {
+        const download = DownloadManager.parseDownloadUrl(url);
+        if (!download) return DownloadManager.parseModelUrl(url);
+        const version = await this.apiClient.fetchCivitaiModelByVersion(download.modelVersionId);
+        if (!version?.modelId) {
+            throw new Error(translate('modals.download.errors.noVersions'));
+        }
+        return { ...download, modelId: String(version.modelId), source: null };
+    }
+
+    getLinkedFile(version, fileId) {
+        if (!fileId) return null;
+        const file = this._getWeightFiles(version).find(f => String(f.id) === fileId);
+        if (file) return file;
+        const existsAsNonWeightFile = (version?.files || []).some(f => String(f.id) === fileId);
+        if (existsAsNonWeightFile) {
+            throw new Error(translate('modals.download.errors.linkedFileNotWeightFile', { fileId },
+                `File ${fileId} is not a downloadable model file.`));
+        }
+        throw new Error(translate('modals.download.errors.linkedFileNotFound', { fileId },
+            `File ${fileId} was not found in the requested model version.`));
+    }
+
     static parseModelUrl(url) {
         const civarchiveMatch = url.match(/https?:\/\/(?:www\.)?(?:civitaiarchive|civarchive)\.com\/models\/(\d+)/i);
         if (civarchiveMatch) {
@@ -520,6 +592,8 @@ export class DownloadManager {
     static detectUrlType(url) {
         const trimmed = url.trim();
         if (!trimmed) return null;
+
+        if (DownloadManager.parseDownloadUrl(trimmed)) return { type: 'civitai' };
 
         // CivitAI — matches civitai.com, civitai.red, civitai.green, etc.
         if (/civitai\.(?:com|red|green)\/models\//i.test(trimmed) || /civitaiarchive|civarchive/i.test(trimmed)) {
@@ -750,6 +824,10 @@ export class DownloadManager {
     }
 
     selectVersion(versionId) {
+        if (String(this.currentVersion?.id) !== String(versionId)) {
+            this.selectedFile = null;
+            this.selectedFiles = [];
+        }
         this.currentVersion = this.versions.find(v => v.id.toString() === versionId.toString());
         if (!this.currentVersion) return;
 
@@ -981,8 +1059,11 @@ export class DownloadManager {
     async proceedToLocationContent() {
 
         try {
+            this._resolvedRoot = null;
+            this._matchedRule = null;
             this._isDiffusionModel = await this._resolveIsDiffusionModel();
             this._otherSubType = await this._resolveOtherSubType();
+            this._resolvedRoot = await this._resolveRuleRoot();
             // Each location-step entry starts from the auto classification;
             // the user can override it via the checkpoint/diffusion toggle.
             this._routingOverride = null;
@@ -1073,13 +1154,59 @@ export class DownloadManager {
         }
         console.log('Default root:', defaultRoot);
         console.log('Available roots:', rootsData.roots);
-        if (defaultRoot && rootsData.roots.includes(defaultRoot)) {
-            console.log(`Setting default root: ${defaultRoot}`);
-            modelRoot.value = defaultRoot;
+        // A download_root_rules hit preselects the rule's root so the
+        // location-step preview matches where the download will land.
+        const preferredRoot = (this._resolvedRoot && rootsData.roots.includes(this._resolvedRoot))
+            ? this._resolvedRoot
+            : defaultRoot;
+        if (preferredRoot && rootsData.roots.includes(preferredRoot)) {
+            console.log(`Setting default root: ${preferredRoot}`);
+            modelRoot.value = preferredRoot;
         }
 
         document.getElementById('modelRootLabel').textContent =
             translate('modals.download.selectTypeRoot', { type: subtypeDisplay });
+
+        this._renderRuleMatchHint();
+    }
+
+    /**
+     * Show which download_root_rules rule routed this download to the
+     * preselected root (or hide the hint when none matched). The user can
+     * still override the root manually; the hint only explains the
+     * preselection.
+     */
+    _renderRuleMatchHint() {
+        const hint = document.getElementById('downloadRuleMatchHint');
+        if (!hint) return;
+
+        const rule = this._matchedRule;
+        if (!rule || (rule.match_type !== 'base_model' && rule.match_type !== 'tag')) {
+            hint.hidden = true;
+            hint.textContent = '';
+            return;
+        }
+
+        const match = Array.isArray(rule.match) ? rule.match : [];
+        let value;
+        let i18nKey;
+        let fallback;
+        if (rule.match_type === 'tag') {
+            const modelTags = (this.currentVersion?.modelTags || [])
+                .map((tag) => String(tag).trim().toLowerCase());
+            value = match.find((entry) => modelTags.includes(String(entry).trim().toLowerCase()))
+                || match[0]
+                || '';
+            i18nKey = 'modals.download.routedByRule.tag';
+            fallback = `Routed by rule: tag "${value}"`;
+        } else {
+            value = this.currentVersion?.baseModel || match[0] || '';
+            i18nKey = 'modals.download.routedByRule.baseModel';
+            fallback = `Routed by rule: base model "${value}"`;
+        }
+
+        hint.textContent = translate(i18nKey, { value }, fallback);
+        hint.hidden = false;
     }
 
     /**
@@ -1166,12 +1293,18 @@ export class DownloadManager {
                     model_type: 'checkpoint',
                     base_model: this.currentVersion?.baseModel || '',
                     file_types: fileTypes,
+                    tags: this.currentVersion?.modelTags || [],
                 }),
             });
             if (!response.ok) {
                 throw new Error(`routing endpoint returned ${response.status}`);
             }
             const data = await response.json();
+            if (typeof data.resolved_root === 'string' && data.resolved_root) {
+                // Root a download_root_rules rule would send this download to.
+                this._resolvedRoot = data.resolved_root;
+            }
+            this._matchedRule = data.matched_rule || null;
             if (typeof data.is_diffusion_model === 'boolean') {
                 return data.is_diffusion_model;
             }
@@ -1180,6 +1313,52 @@ export class DownloadManager {
                 + 'falling back to local file-type check:', error);
         }
         return localFileTypeCheck;
+    }
+
+    /**
+     * Resolve the root a download_root_rules rule routes this download to,
+     * so the location step preselects the same root the backend will use.
+     * Returns null when no rule matches or the endpoint is unavailable.
+     */
+    async _resolveRuleRoot() {
+        // The checkpoints page already fetched the routing decision
+        // (including the rule-resolved root) in _resolveIsDiffusionModel.
+        if (this.apiClient.modelType === 'checkpoints') {
+            return this._resolvedRoot ?? null;
+        }
+
+        // Other-page downloads route by sub_type, not by base model rules;
+        // without version metadata (e.g. Hugging Face downloads) there is
+        // no base model to match a rule against.
+        if (this.apiClient.modelType === 'other'
+            || (!this.selectedFile && !this.currentVersion)) {
+            return null;
+        }
+
+        try {
+            const fileTypes = this.selectedFile
+                ? [this.selectedFile.type]
+                : (this.currentVersion?.files || []).map(f => f.type);
+            const response = await fetch(DOWNLOAD_ENDPOINTS.routing, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model_type: this.apiClient.modelType.replace(/s$/, ''),
+                    base_model: this.currentVersion?.baseModel || '',
+                    file_types: fileTypes,
+                    tags: this.currentVersion?.modelTags || [],
+                }),
+            });
+            if (!response.ok) {
+                throw new Error(`routing endpoint returned ${response.status}`);
+            }
+            const data = await response.json();
+            this._matchedRule = data.matched_rule || null;
+            return (typeof data.resolved_root === 'string' && data.resolved_root) || null;
+        } catch (error) {
+            console.warn('[download] root rule resolution unavailable:', error);
+            return null;
+        }
     }
 
     /**
@@ -1298,6 +1477,7 @@ export class DownloadManager {
         suppressSuccessToast = false,
         suppressFailureSummary = false,
         isLatestVersion = null,
+        wasLocallyOwned = null,
     }) {
         const config = this.apiClient?.apiConfig?.config;
 
@@ -1306,7 +1486,7 @@ export class DownloadManager {
         }
 
         const displayName = versionName || `#${versionId}`;
-        const retryParams = { modelId, versionId, versionName, modelRoot, targetFolder, useDefaultPaths, useSaveDirAsRoot, source, fileParams, closeModal: false, deferReload, suppressSuccessToast, suppressFailureSummary, isLatestVersion };
+        const retryParams = { modelId, versionId, versionName, modelRoot, targetFolder, useDefaultPaths, useSaveDirAsRoot, source, fileParams, closeModal: false, deferReload, suppressSuccessToast, suppressFailureSummary, isLatestVersion, wasLocallyOwned };
         this._lastDownloadError = null;
         let ws = null;
         let updateProgress = () => { };
@@ -1461,6 +1641,7 @@ export class DownloadManager {
                 await this._reconcileViewAfterDownload({
                     modelId,
                     isLatestVersion: isLatestVersion ?? this._isDownloadingLatestVersion(versionId),
+                    wasLocallyOwned,
                 });
             }
 
@@ -1517,9 +1698,10 @@ export class DownloadManager {
      *   (the update flag is model-level, so every visible card of the
      *   model disappears at once).
      * - Normal listing: the card stays; only the update flag is cleared.
-     * - The model is not in the current view (different folder / filter /
-     *   window): nothing changes, which also covers brand-new models whose
-     *   card did not exist before.
+     * - An owned model outside the current view (different folder / filter /
+     *   window): nothing changes.
+     * - A brand-new model has no card to reconcile in place, so the listing
+     *   falls back to the legacy reload to make the new card visible.
      *
      * The sidebar folder tree is refreshed separately so folder counts
      * stay accurate without touching the model listing or scroll position.
@@ -1533,9 +1715,14 @@ export class DownloadManager {
      * @param {boolean} [opts.refreshSidebar=true] Whether to refresh the
      *   sidebar folder tree afterwards (batch callers batch this into a
      *   single refresh).
+     * @param {boolean|null} [opts.wasLocallyOwned=null] Whether any version
+     *   of the model was already in the library before this download. Only
+     *   an explicit true keeps the no-op for a model outside the current
+     *   view; false (brand-new) and null (unknown) reload the listing so a
+     *   new card can appear.
      * @returns {Promise<boolean>} True when an in-place update was applied.
      */
-    async _reconcileViewAfterDownload({ modelId, isLatestVersion = true, refreshSidebar = true } = {}) {
+    async _reconcileViewAfterDownload({ modelId, isLatestVersion = true, refreshSidebar = true, wasLocallyOwned = null } = {}) {
         const scroller = state?.virtualScroller;
         const items = Array.isArray(scroller?.items) ? scroller.items : [];
 
@@ -1559,8 +1746,15 @@ export class DownloadManager {
         });
 
         if (matches.length === 0) {
-            // Downloaded model is not visible in the current view — keep the
-            // listing untouched, only refresh folder counts.
+            // No card of this model is visible. A brand-new model (or one
+            // whose ownership is unknown) has no card anywhere in the
+            // listing to reconcile in place — fall back to the legacy
+            // reload so the new card becomes visible. An owned model that
+            // merely sits outside the current view keeps the no-op (#1078).
+            if (wasLocallyOwned !== true) {
+                await resetAndReload(true);
+                return true;
+            }
             await this._refreshSidebarAfterReconcile(refreshSidebar);
             return false;
         }
@@ -1613,6 +1807,7 @@ export class DownloadManager {
                 modelId,
                 isLatestVersion: this._isVersionLatest(item.selectedVersion?.id, item.versions),
                 refreshSidebar: false,
+                wasLocallyOwned: this._computeWasLocallyOwned(item.versions),
             });
         }
         await this._refreshSidebarAfterReconcile(true);
@@ -1670,6 +1865,19 @@ export class DownloadManager {
     /** True when the currently selected version is the newest remote one. */
     _isDownloadingLatestVersion(versionId) {
         return this._isVersionLatest(versionId, this.versions);
+    }
+
+    /**
+     * Whether any version of the model was already in the library before
+     * the download, derived from the `existsLocally` flags of the version
+     * list the modal fetched up front. Returns null when no version list is
+     * available (callers outside the modal flow).
+     */
+    _computeWasLocallyOwned(versions) {
+        if (!Array.isArray(versions) || versions.length === 0) {
+            return null;
+        }
+        return versions.some(version => version && version.existsLocally === true);
     }
 
     /**
@@ -1758,6 +1966,7 @@ export class DownloadManager {
             await this._reconcileViewAfterDownload({
                 modelId: this.modelId,
                 isLatestVersion: this._isDownloadingLatestVersion(this.currentVersion?.id),
+                wasLocallyOwned: this._computeWasLocallyOwned(this.versions),
             });
         }
         return failedItems.length === 0;
@@ -2342,6 +2551,7 @@ export class DownloadManager {
                 source: this.source,
                 fileParams,
                 closeModal: true,
+                wasLocallyOwned: this._computeWasLocallyOwned(this.versions),
             });
         }
 
@@ -2351,6 +2561,11 @@ export class DownloadManager {
             if (!m.selectedVersion) return false;
             // HF items have selectedVersion as a boolean marker + checked flag
             if (isExternalModelSource(m.source)) return m.checked !== false;
+            if (m.selectedFile && this._getWeightFiles(m.selectedVersion)
+                .some(file => String(file.id) === String(m.selectedFile.id))) {
+                return this._getRemainingFiles(m.selectedVersion)
+                    .some(file => String(file.id) === String(m.selectedFile.id));
+            }
             return !m.selectedVersion.existsLocally;
         });
         if (downloadItems.length === 0) {
@@ -2469,8 +2684,6 @@ export class DownloadManager {
                         wsHf.close();
                     }
                 } else {
-                    console.log('[download] batch download: fileParams NOT passed for modelId=%s, versionId=%s — backend will use primary file',
-                        item.modelId, item.selectedVersion?.id);
                     response = await this.apiClient.downloadModel(
                         item.modelId,
                         item.selectedVersion.id,
@@ -2478,7 +2691,17 @@ export class DownloadManager {
                         targetFolder,
                         useDefaultPaths,
                         batchDownloadId,
-                        item.source
+                        item.source,
+                        item.selectedFile && item.selectedVersion.files?.some(f => f.id === item.selectedFile.id)
+                            ? {
+                                id: item.selectedFile.id,
+                                name: item.selectedFile.name || null,
+                                type: item.selectedFile.type || 'Model',
+                                format: item.selectedFile.metadata?.format || null,
+                                size: item.selectedFile.metadata?.size || null,
+                                fp: item.selectedFile.metadata?.fp || null,
+                            }
+                            : null
                     );
                 }
 

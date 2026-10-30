@@ -874,6 +874,22 @@ export class BaseModelApiClient {
                                 break;
                             }
 
+                            case 'rate_limited': {
+                                // Backend aborted the batch after repeated rate limits;
+                                // settle the promise so the loading overlay closes.
+                                let summaryText = `Aborted (rate limited): updated ${data.success} of ${data.processed} ${this.apiConfig.config.displayName}s`;
+                                if (data.failure_count > 0) {
+                                    summaryText += ` | ❌ ${data.failure_count} failed`;
+                                }
+                                if (data.skipped_count > 0) {
+                                    summaryText += ` | ⏭️ ${data.skipped_count} skipped`;
+                                }
+                                summaryText += ` (⏱ ${data.elapsed_seconds || '?'}s)`;
+                                loading.setStatus(summaryText);
+                                resolve(data);
+                                break;
+                            }
+
                             case 'cancelled':
                                 loading.setStatus('Operation cancelled by user');
                                 resolve(data);
@@ -1071,11 +1087,24 @@ export class BaseModelApiClient {
             return;
         }
 
+        if (data.status === 'rate_limited') {
+            showToast('toast.api.metadataFetchRateLimited', {
+                success,
+                total,
+                failed: data.failure_count || 0,
+                skipped: data.skipped_count || 0,
+            }, 'warning');
+            this._showFailureDetailsModal(data);
+            return;
+        }
+
         this._showFailureDetailsModal(data);
     }
 
     _showFailureDetailsModal(data) {
-        const { failures = [], success, processed, total, failure_count, skipped_count, elapsed_seconds } = data;
+        const { failures = [], success, processed, total, failure_count, skipped_count, elapsed_seconds, offline_skipped = 0, offline_roots = [] } = data;
+
+        const offlineRootNames = offline_roots.map((root) => root.label || root.path || String(root)).join(', ');
 
         // Build failure list HTML
         const failureRows = failures.map((f, i) =>
@@ -1092,6 +1121,11 @@ export class BaseModelApiClient {
                     <button class="close" data-action="close-modal">&times;</button>
 
                     <h2>${translate('modals.metadataFetchSummary.title', {}, 'Metadata Fetch Summary')}</h2>
+
+                    ${data.status === 'rate_limited' ? `
+                    <div class="refresh-rate-limited-notice">
+                        <i class="fas fa-exclamation-triangle"></i> ${translate('modals.metadataFetchSummary.rateLimitedNotice', {}, 'Fetch aborted: the metadata provider rate limit was reached. Re-run "Fetch from Civitai" later to retry the remaining models.')}
+                    </div>` : ''}
 
                     <div class="refresh-summary-stats">
                         <div class="stat-card stat-card-success">
@@ -1112,6 +1146,13 @@ export class BaseModelApiClient {
                                 <span class="stat-card-value">${skipped_count}</span>
                             </div>
                         </div>
+                        ${offline_skipped > 0 ? `
+                        <div class="stat-card stat-card-offline" title="${this._escapeHtml(offlineRootNames)}">
+                            <div class="stat-card-body">
+                                <span class="stat-card-label">${translate('modals.metadataFetchSummary.statOffline', {}, 'Drive Offline')}</span>
+                                <span class="stat-card-value">${offline_skipped}</span>
+                            </div>
+                        </div>` : ''}
                         <div class="stat-card stat-card-total">
                             <div class="stat-card-body">
                                 <span class="stat-card-label">${translate('modals.metadataFetchSummary.statTotal', {}, 'Total Scanned')}</span>
@@ -1464,6 +1505,15 @@ export class BaseModelApiClient {
         }
     }
 
+    async fetchCivitaiModelByVersion(versionId) {
+        const response = await fetch(`${this.apiConfig.endpoints.civitaiModelByVersion}/${versionId}`);
+        if (!response.ok) {
+            const result = await response.json().catch(() => ({}));
+            throw new Error(result.error || 'Failed to fetch model version');
+        }
+        return await response.json();
+    }
+
     async fetchCivitaiVersions(modelId, source = null) {
         try {
             let requestUrl = `${this.apiConfig.endpoints.civitaiVersions}/${modelId}`;
@@ -1478,7 +1528,7 @@ export class BaseModelApiClient {
                 if (errorData && errorData.error && errorData.error.includes('Model type mismatch')) {
                     throw new Error(`This model is not a ${this.apiConfig.config.displayName}. Please switch to the appropriate page to download this model type.`);
                 }
-                throw new Error('Failed to fetch model versions');
+                throw new Error((errorData && errorData.error) || 'Failed to fetch model versions');
             }
             return await response.json();
         } catch (error) {
@@ -1608,7 +1658,9 @@ export class BaseModelApiClient {
      * Only model-free folders can be removed; the backend answers with a 409
      * `not_empty`/`busy` conflict otherwise. Those codes are attached to the
      * thrown Error (`code`, `manifest`) so callers can explain the refusal
-     * instead of showing a bare message.
+     * instead of showing a bare message. A folder that is already gone from disk
+     * is forgotten instead (`code: 'missing'`, success), which is what lets the
+     * sidebar clear a node whose directory was moved outside LoRA Manager.
      *
      * @param {string} folderPath Absolute business path of the folder
      * @param {{dryRun?: boolean}} [options]
@@ -1635,6 +1687,38 @@ export class BaseModelApiClient {
 
         return result;
     }
+
+    /**
+     * Drop the records of a folder that no longer exists on disk.
+     *
+     * Deleting such a folder cannot work -- there is nothing left to remove --
+     * so a node whose directory was moved or deleted outside LoRA Manager is
+     * cleared with this instead. The backend refuses while any root still holds
+     * the directory (`code: 'exists'`), because then it is a delete.
+     *
+     * @param {string} folder - Library-relative folder path (e.g. "Krea2/Women")
+     * @returns {Promise<Object>} `{success: true, folder}` on success
+     */
+    async forgetFolder(folder) {
+        const response = await fetch(this.apiConfig.endpoints.forgetFolder, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ folder })
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok || result.success === false) {
+            const error = new Error(result.error || 'Failed to remove folder from the sidebar');
+            error.code = result.code || null;
+            throw error;
+        }
+
+        return result;
+    }
+
 
     /**
      * Rename a folder inside the library roots.

@@ -33,6 +33,7 @@ from ...services.model_scanner import ReconcileScope
 from ...services.preview_asset_service import PreviewAssetService
 from ...services.service_registry import ServiceRegistry
 from ...services.settings_manager import SettingsManager, get_settings_manager
+from ...services.first_run_manager import get_first_run_manager
 from ...services.tag_update_service import TagUpdateService
 from ...services.use_cases import (
     AutoOrganizeInProgressError,
@@ -56,6 +57,7 @@ from ...utils.civitai_utils import resolve_license_payload
 from ...utils.file_utils import calculate_sha256
 from ...utils.metadata_manager import MetadataManager
 from ...utils.paid_access import is_early_access_deadline_active
+from ...utils.root_paths import normalize_root_identity
 from ...utils.sidecar_paths import get_metadata_path
 from ...utils.url_utils import relative_root_prefix
 
@@ -212,6 +214,10 @@ class ModelPageView:
 
             template_context = {
                 "is_initializing": is_initializing,
+                # First-run gate: the welcome page takes precedence over the
+                # initialization screen (the scanner cache is empty because no
+                # scan has run yet, not because one is in flight).
+                "awaiting_first_scan": get_first_run_manager().is_awaiting_first_scan(),
                 "settings": self._settings,
                 "request": request,
                 "folders": [],
@@ -228,9 +234,14 @@ class ModelPageView:
                         force_refresh=False
                     )
                     template_context["folders"] = getattr(cache, "folders", [])
-                except Exception as cache_error:  # pragma: no cover - logging path
+                except Exception as cache_error:
                     self._logger.error("Error loading cache data: %s", cache_error)
+                    # Render the initialization view in its explicit error
+                    # state: pretending to be initializing would send the
+                    # page into a poll/reload loop, because init-status
+                    # reports the (idle) scanner as complete.
                     template_context["is_initializing"] = True
+                    template_context["init_error"] = str(cache_error)
 
             if self._page_context_provider is not None:
                 try:
@@ -1263,7 +1274,18 @@ class ModelQueryHandler:
 
             if requested_roots:
                 configured = self._service.get_model_roots()
-                unknown = [root for root in requested_roots if root not in configured]
+                # Compare by identity, not by string: callers may pass the host's
+                # own spelling of a root (backslashes or a differently cased drive
+                # letter on Windows, as settings.json and ComfyUI show it), which
+                # names the same directory the live list holds forward-slashed.
+                known_roots = {
+                    normalize_root_identity(root) for root in configured
+                }
+                unknown = [
+                    root
+                    for root in requested_roots
+                    if normalize_root_identity(root) not in known_roots
+                ]
                 if unknown:
                     return web.json_response(
                         {"error": "Unknown model root(s)", "roots": unknown}, status=400
@@ -2594,8 +2616,8 @@ class ModelCivitaiHandler:
             metadata_provider = await self._metadata_provider_factory()
             try:
                 response = await metadata_provider.get_model_versions(model_id)
-            except ResourceNotFoundError:
-                return web.Response(status=404, text="Model not found")
+            except ResourceNotFoundError as exc:
+                return web.json_response({"error": str(exc)}, status=404)
             if not response or not response.get("modelVersions"):
                 return web.Response(status=404, text="Model not found")
 
@@ -2626,7 +2648,12 @@ class ModelCivitaiHandler:
                     exc,
                 )
 
+            # Model-level tags travel with each version so the download
+            # location step can preview download_root_rules tag matches.
+            model_tags = response.get("tags") or []
+
             for version in versions:
+                version["modelTags"] = model_tags
                 version_id = None
                 version_id_raw = version.get("id")
                 if version_id_raw is not None:
@@ -2850,6 +2877,39 @@ class ModelMoveHandler:
             return web.json_response(result, status=status)
         except Exception as exc:
             self._logger.error("Error deleting folder: %s", exc, exc_info=True)
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+    async def forget_folder(self, request: web.Request) -> web.Response:
+        """Drop the records of a folder that no longer exists on disk (#1145).
+
+        The sidebar's delete flow reaches this when the node it holds maps to no
+        directory any more: there is nothing to delete, so the only cleanup left
+        is forgetting the folder entry and the cached models under it.
+        """
+        data: Dict[str, Any] = {}
+        if request.method == "POST":
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+        folder = str(data.get("folder") or request.query.get("folder") or "").strip()
+        if not folder:
+            return web.json_response(
+                {"success": False, "error": "Folder is required"}, status=400
+            )
+
+        try:
+            result = await self._move_service.forget_folder(folder)
+            if result.get("success"):
+                _broadcast_models_changed()
+                return web.json_response(result, status=200)
+
+            # `exists` is a conflict between the tree the client rendered and the
+            # on-disk truth: the folder is still there, so it must be deleted.
+            status = 409 if result.get("code") == "exists" else 400
+            return web.json_response(result, status=status)
+        except Exception as exc:
+            self._logger.error("Error forgetting folder: %s", exc, exc_info=True)
             return web.json_response({"success": False, "error": str(exc)}, status=500)
 
     async def rename_folder(self, request: web.Request) -> web.Response:
@@ -3929,6 +3989,7 @@ class ModelHandlerSet:
             "create_folder": self.move.create_folder,
             "resolve_folder": self.move.resolve_folder,
             "delete_folder": self.move.delete_folder,
+            "forget_folder": self.move.forget_folder,
             "rename_folder": self.move.rename_folder,
             "auto_organize_models": self.auto_organize.auto_organize_models,
             "get_auto_organize_progress": self.auto_organize.get_auto_organize_progress,

@@ -19,6 +19,14 @@ import { MODEL_CARD_DRAG_MIME_TYPE } from '../utils/constants.js';
 // makes the hidden sidebar discoverable/recoverable.
 const SIDEBAR_DEFAULT_HIDDEN_PAGES = new Set(['other']);
 
+// Hover a collapsed folder this long while dragging to auto-expand it.
+const DRAG_HOVER_EXPAND_DELAY_MS = 600;
+
+// Distance from the tree container's top/bottom edge that starts
+// auto-scrolling during a drag, and the scroll speed per animation frame.
+const SIDEBAR_AUTOSCROLL_ZONE_PX = 48;
+const SIDEBAR_AUTOSCROLL_SPEED_PX = 12;
+
 export class SidebarManager {
     constructor() {
         this.pageControls = null;
@@ -62,6 +70,14 @@ export class SidebarManager {
         // Bumped on every modal open/close so a late dry-run answer can never
         // repaint a modal the user has already dismissed or retargeted.
         this._deleteFolderProbeToken = 0;
+
+        // Drag-and-drop transient state: the custom drag image element, the
+        // pending hover-to-expand timer, and the edge auto-scroll loop.
+        this._dragPreviewElement = null;
+        this._dragExpandTimer = null;
+        this._dragExpandPath = null;
+        this._autoScrollFrame = null;
+        this._autoScrollDirection = 0;
 
         // Bind methods
         this.handleTreeClick = this.handleTreeClick.bind(this);
@@ -278,6 +294,11 @@ export class SidebarManager {
             } catch (error) {
                 // Ignore serialization errors
             }
+
+            // Replace the browser's default full-card snapshot with a small
+            // chip (thumbnail + name + count) so the drag image does not
+            // cover the folder tree the user is aiming at.
+            this._setDragPreviewImage(event, card, filePaths.length);
         }
 
         card.classList.add('dragging');
@@ -287,6 +308,8 @@ export class SidebarManager {
         if (sidebar) {
             sidebar.classList.add('dragging-active');
         }
+
+        this._startSidebarAutoScroll();
     }
 
     handleCardDragEnd(event) {
@@ -294,15 +317,175 @@ export class SidebarManager {
         if (card) {
             card.classList.remove('dragging');
         }
-        
+
         // Remove dragging state from sidebar
         const sidebar = document.getElementById('folderSidebar');
         if (sidebar) {
             sidebar.classList.remove('dragging-active');
         }
 
+        this._removeDragPreviewImage();
+        this._cancelDragExpand();
+        this._stopSidebarAutoScroll();
         this.clearAllDropHighlights();
         this.resetDragState();
+    }
+
+    /**
+     * Swap the default drag image (a full-size snapshot of the card) for a
+     * compact chip: preview thumbnail, model name, and a count badge for
+     * bulk drags. The chip is anchored below-right of the cursor so it never
+     * covers the folder row the pointer is hovering.
+     */
+    _setDragPreviewImage(event, card, count) {
+        const dataTransfer = event.dataTransfer;
+        if (!dataTransfer || typeof dataTransfer.setDragImage !== 'function') return;
+
+        this._removeDragPreviewImage();
+
+        const chip = document.createElement('div');
+        chip.className = 'model-card-drag-chip';
+
+        // A blurred (mature-content) preview stays hidden in the chip too.
+        const isBlurred = Boolean(card.querySelector('.card-preview.blurred'));
+        const previewImg = card.querySelector('.card-preview img');
+        if (previewImg && previewImg.src && !isBlurred) {
+            const thumb = document.createElement('img');
+            thumb.className = 'model-card-drag-chip-thumb';
+            thumb.src = previewImg.src;
+            thumb.alt = '';
+            chip.appendChild(thumb);
+        } else {
+            const icon = document.createElement('i');
+            const isVideo = Boolean(card.querySelector('.card-preview video'));
+            icon.className = `model-card-drag-chip-icon fas ${isVideo ? 'fa-film' : 'fa-image'}`;
+            chip.appendChild(icon);
+        }
+
+        const name = document.createElement('span');
+        name.className = 'model-card-drag-chip-name';
+        name.textContent = card.dataset.name || card.dataset.file_name || '';
+        chip.appendChild(name);
+
+        if (count > 1) {
+            const badge = document.createElement('span');
+            badge.className = 'model-card-drag-chip-count';
+            badge.textContent = `×${count}`;
+            chip.appendChild(badge);
+        }
+
+        document.body.appendChild(chip);
+        this._dragPreviewElement = chip;
+
+        try {
+            // Negative offsets place the chip below-right of the cursor.
+            dataTransfer.setDragImage(chip, -12, -12);
+        } catch (error) {
+            // A failed setDragImage keeps the default image; still fine.
+        }
+    }
+
+    _removeDragPreviewImage() {
+        if (this._dragPreviewElement) {
+            this._dragPreviewElement.remove();
+            this._dragPreviewElement = null;
+        }
+    }
+
+    /**
+     * Expand a collapsed tree folder after a short hover during a drag, so
+     * nested folders can be dropped into without a separate click.
+     */
+    _scheduleDragExpand(folderElement) {
+        if (this.displayMode !== 'tree') return;
+
+        const treeNode = folderElement.classList.contains('sidebar-tree-node')
+            ? folderElement
+            : folderElement.closest('.sidebar-tree-node');
+        const path = treeNode?.dataset.path;
+        if (!treeNode || !path) return;
+        if (this.expandedNodes.has(path)) return;
+        if (!treeNode.querySelector(':scope > .sidebar-tree-children')) return;
+
+        if (this._dragExpandTimer && this._dragExpandPath === path) return;
+
+        this._cancelDragExpand();
+        this._dragExpandPath = path;
+        this._dragExpandTimer = setTimeout(() => {
+            this._dragExpandTimer = null;
+            this._dragExpandPath = null;
+
+            // Re-validate against the live DOM: the drag may have ended or the
+            // tree may have re-rendered while the timer was pending.
+            if (!this.draggedFilePaths || this.draggedFilePaths.length === 0) return;
+            const folderTree = this.folderTreeElement || document.getElementById('sidebarFolderTree');
+            const node = folderTree
+                ? [...folderTree.querySelectorAll('.sidebar-tree-node')].find(el => el.dataset.path === path)
+                : null;
+            if (!node || this.expandedNodes.has(path)) return;
+
+            this.expandedNodes.add(path);
+            // Toggle in place instead of re-rendering so the drop highlight
+            // and the hover position survive the expansion.
+            node.querySelector(':scope > .sidebar-tree-node-content > .sidebar-tree-expand-icon')
+                ?.classList.add('expanded');
+            node.querySelector(':scope > .sidebar-tree-children')?.classList.add('expanded');
+            this.saveExpandedState();
+        }, DRAG_HOVER_EXPAND_DELAY_MS);
+    }
+
+    _cancelDragExpand() {
+        if (this._dragExpandTimer) {
+            clearTimeout(this._dragExpandTimer);
+            this._dragExpandTimer = null;
+        }
+        this._dragExpandPath = null;
+    }
+
+    _startSidebarAutoScroll() {
+        this._stopSidebarAutoScroll();
+        this._autoScrollDirection = 0;
+
+        if (typeof requestAnimationFrame !== 'function') return;
+
+        const step = () => {
+            if (!this.draggedFilePaths || this.draggedFilePaths.length === 0) {
+                this._autoScrollFrame = null;
+                return;
+            }
+            if (this._autoScrollDirection !== 0) {
+                const container = this.folderTreeElement?.closest('.sidebar-tree-container');
+                if (container) {
+                    container.scrollTop += this._autoScrollDirection * SIDEBAR_AUTOSCROLL_SPEED_PX;
+                }
+            }
+            this._autoScrollFrame = requestAnimationFrame(step);
+        };
+        this._autoScrollFrame = requestAnimationFrame(step);
+    }
+
+    _stopSidebarAutoScroll() {
+        if (this._autoScrollFrame !== null && typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(this._autoScrollFrame);
+        }
+        this._autoScrollFrame = null;
+        this._autoScrollDirection = 0;
+    }
+
+    _updateAutoScrollDirection(clientY) {
+        const container = this.folderTreeElement?.closest('.sidebar-tree-container');
+        if (!container || typeof clientY !== 'number') {
+            this._autoScrollDirection = 0;
+            return;
+        }
+        const rect = container.getBoundingClientRect();
+        if (clientY < rect.top + SIDEBAR_AUTOSCROLL_ZONE_PX) {
+            this._autoScrollDirection = -1;
+        } else if (clientY > rect.bottom - SIDEBAR_AUTOSCROLL_ZONE_PX) {
+            this._autoScrollDirection = 1;
+        } else {
+            this._autoScrollDirection = 0;
+        }
     }
 
     getRootPathFromCard(card) {
@@ -327,11 +510,51 @@ export class SidebarManager {
         }
 
         const suffix = `/${normalizedFolder}`;
-        if (directory.endsWith(suffix)) {
+        // Case-insensitive: a cached folder may differ from the file path in
+        // case alone, which is the same directory on Windows/macOS.
+        if (directory.toLowerCase().endsWith(suffix.toLowerCase())) {
             return directory.slice(0, -suffix.length);
         }
 
-        return directory;
+        // Folder and file path disagree (stale cache entry): returning the
+        // file's own directory here would make the move nest the target under
+        // the source folder (issue #1148). Let the caller resolve the root
+        // from the library roots instead.
+        return null;
+    }
+
+    /**
+     * Resolve the library root a dragged file lives under.
+     *
+     * Prefers the authoritative root list (longest root prefixing the file
+     * path) over the card heuristic, which silently derives a wrong root when
+     * the cached folder disagrees with the file path (issue #1148).
+     *
+     * `fallbackRoot` is passed in instead of read from `this.draggedRootPath`:
+     * the drag state is cleared by `dragend` while this request is in flight.
+     */
+    async _resolveMoveRoot(filePath, fallbackRoot = '') {
+        try {
+            if (typeof this.apiClient?.fetchModelRoots === 'function') {
+                const rootsData = await this.apiClient.fetchModelRoots();
+                const roots = rootsData?.roots || [];
+                const normalizedFile = (filePath || '').replace(/\\/g, '/').toLowerCase();
+                let best = '';
+                for (const root of roots) {
+                    const normalizedRoot = (root || '').replace(/\\/g, '/').replace(/\/+$/, '');
+                    if (!normalizedRoot) continue;
+                    const key = normalizedRoot.toLowerCase();
+                    if ((normalizedFile === key || normalizedFile.startsWith(key + '/')) &&
+                        normalizedRoot.length > best.length) {
+                        best = normalizedRoot;
+                    }
+                }
+                if (best) return best;
+            }
+        } catch (error) {
+            console.warn('[SidebarManager] Failed to resolve move root from library roots:', error);
+        }
+        return fallbackRoot ? fallbackRoot.replace(/\\/g, '/') : '';
     }
 
     combineRootAndRelativePath(root, relative) {
@@ -389,6 +612,7 @@ export class SidebarManager {
 
         this.setDropTargetHighlight(folderElement, true);
         this.currentDropTarget = folderElement;
+        this._scheduleDragExpand(folderElement);
     }
 
     handleFolderDragOver(event) {
@@ -402,6 +626,8 @@ export class SidebarManager {
         if (event.dataTransfer) {
             event.dataTransfer.dropEffect = 'move';
         }
+
+        this._updateAutoScrollDirection(event.clientY);
     }
 
     handleFolderDragLeave(event) {
@@ -416,6 +642,15 @@ export class SidebarManager {
             if (this.currentDropTarget === folderElement) {
                 this.currentDropTarget = null;
             }
+            if (this._dragExpandPath && folderElement.dataset.path === this._dragExpandPath) {
+                this._cancelDragExpand();
+            }
+        }
+
+        // Pointer left the tree entirely: stop any edge auto-scroll.
+        const folderTree = this.folderTreeElement || document.getElementById('sidebarFolderTree');
+        if (folderTree && (!relatedTarget || !folderTree.contains(relatedTarget))) {
+            this._autoScrollDirection = 0;
         }
     }
 
@@ -430,6 +665,8 @@ export class SidebarManager {
 
         this.setDropTargetHighlight(folderElement, false);
         this.currentDropTarget = null;
+        this._cancelDragExpand();
+        this._autoScrollDirection = 0;
 
         const targetPath = folderElement.dataset.path || '';
 
@@ -440,11 +677,22 @@ export class SidebarManager {
     }
 
     async performDragMove(targetRelativePath) {
+        // Snapshot the drag state before the first await. The browser dispatches
+        // `dragend` right after `drop`, and handleCardDragEnd() calls
+        // resetDragState() while this move is still awaiting the roots request.
+        // Reading the instance fields after that await would either throw
+        // (null.length) or abort the move (issue: drag-drop move did nothing).
+        const filePaths = Array.isArray(this.draggedFilePaths) ? [...this.draggedFilePaths] : [];
+        const fromBulk = Boolean(this.draggedFromBulk);
+        const fallbackRoot = this.draggedRootPath
+            ? this.draggedRootPath.replace(/\\/g, '/')
+            : '';
+
         console.log('[SidebarManager] performDragMove called with targetRelativePath:', targetRelativePath);
-        console.log('[SidebarManager] draggedFilePaths:', this.draggedFilePaths);
-        console.log('[SidebarManager] draggedRootPath:', this.draggedRootPath);
-        
-        if (!this.draggedFilePaths || this.draggedFilePaths.length === 0) {
+        console.log('[SidebarManager] draggedFilePaths:', filePaths);
+        console.log('[SidebarManager] draggedRootPath:', fallbackRoot);
+
+        if (filePaths.length === 0) {
             console.log('[SidebarManager] performDragMove returning false - no draggedFilePaths');
             return false;
         }
@@ -461,7 +709,7 @@ export class SidebarManager {
             return false;
         }
 
-        const rootPath = this.draggedRootPath ? this.draggedRootPath.replace(/\\/g, '/') : '';
+        const rootPath = await this._resolveMoveRoot(filePaths[0], fallbackRoot);
         console.log('[SidebarManager] rootPath:', rootPath);
         if (!rootPath) {
             console.log('[SidebarManager] performDragMove returning false - no rootPath');
@@ -474,22 +722,22 @@ export class SidebarManager {
         }
 
         const destination = this.combineRootAndRelativePath(rootPath, targetRelativePath);
-        const useBulkMove = this.draggedFromBulk || this.draggedFilePaths.length > 1;
+        const useBulkMove = fromBulk || filePaths.length > 1;
 
         try {
             console.log('[SidebarManager] calling apiClient.move, useBulkMove:', useBulkMove);
             let movedFiles = []; // Array of { original_file_path, new_file_path }
 
             if (useBulkMove) {
-                const results = await this.apiClient.moveBulkModels(this.draggedFilePaths, destination);
+                const results = await this.apiClient.moveBulkModels(filePaths, destination);
                 movedFiles = (results || [])
                     .filter(r => r.success)
                     .map(r => ({ original_file_path: r.original_file_path, new_file_path: r.new_file_path }));
             } else {
-                const result = await this.apiClient.moveSingleModel(this.draggedFilePaths[0], destination);
+                const result = await this.apiClient.moveSingleModel(filePaths[0], destination);
                 if (result) {
                     movedFiles.push({
-                        original_file_path: result.original_file_path || this.draggedFilePaths[0],
+                        original_file_path: result.original_file_path || filePaths[0],
                         new_file_path: result.new_file_path
                     });
                 }
@@ -541,7 +789,7 @@ export class SidebarManager {
             // Refresh sidebar folder tree only (no model data reload)
             await this.refresh();
 
-            if (this.draggedFromBulk && state.bulkMode && typeof bulkManager?.toggleBulkMode === 'function') {
+            if (fromBulk && state.bulkMode && typeof bulkManager?.toggleBulkMode === 'function') {
                 bulkManager.toggleBulkMode();
             }
 
@@ -1734,6 +1982,8 @@ export class SidebarManager {
             showToast('sidebar.deleteFolderResult.busy', {}, 'warning');
         } else if (error?.code === 'missing') {
             showToast('sidebar.deleteFolderResult.missing', {}, 'warning');
+        } else if (error?.code === 'exists') {
+            showToast('sidebar.deleteFolderResult.exists', {}, 'warning');
         } else if (error?.code === 'unresolved') {
             showToast('sidebar.folderResult.unresolved', {}, 'error');
         } else {
@@ -1806,6 +2056,8 @@ export class SidebarManager {
             );
         } else {
             this._pendingDeleteFolderPath = null;
+            confirmBtn.style.display = 'none';
+            confirmBtn.disabled = true;
             if (state === 'busy') {
                 title.textContent = translate(
                     'sidebar.deleteFolderModal.busyTitle', {}, 'A deletion is still pending'
@@ -1820,7 +2072,16 @@ export class SidebarManager {
                 );
                 message.textContent = translate(
                     'sidebar.deleteFolderModal.missingMessage', {},
-                    'This folder no longer exists on disk. Refresh the sidebar and try again.'
+                    'This folder no longer exists on disk. You can remove it from the list.'
+                );
+                // There is nothing left to delete, but the records are what keeps
+                // the ghost node in the tree: offer to drop them (issue #1145).
+                // The confirm re-resolves the node, finds no directory and takes
+                // the forget path.
+                confirmBtn.style.display = '';
+                confirmBtn.disabled = false;
+                confirmBtn.textContent = translate(
+                    'sidebar.deleteFolderModal.removeFromList', {}, 'Remove from list'
                 );
             } else if (state === 'symlink') {
                 title.textContent = translate(
@@ -1849,8 +2110,6 @@ export class SidebarManager {
                         || 'This folder still contains models. Delete or move them first.'
                 );
             }
-            confirmBtn.style.display = 'none';
-            confirmBtn.disabled = true;
         }
 
         if (checking) {
@@ -1943,10 +2202,14 @@ export class SidebarManager {
                 );
                 if (!selected) {
                     const empty = (resolution?.candidates || []).length === 0;
+                    if (empty) {
+                        // No root holds the directory any more: there is nothing
+                        // to delete, so drop the records that keep the node in
+                        // the tree (issue #1145).
+                        return this._forgetFolder(relativePath);
+                    }
                     showToast(
-                        empty
-                            ? 'sidebar.deleteFolderResult.missing'
-                            : 'sidebar.deleteFolderResult.symlink',
+                        'sidebar.deleteFolderResult.symlink',
                         {},
                         'warning'
                     );
@@ -1967,7 +2230,15 @@ export class SidebarManager {
             await this.refresh();
 
             const name = result.folder || relativePath;
-            if (result.restorable) {
+            if (result.code === 'missing') {
+                // The directory was already gone when the delete ran (a race with
+                // the file manager, or a row in the multi-root list): only its
+                // records were dropped, so nothing was deleted and there is
+                // nothing to undo.
+                showToast(
+                    'sidebar.deleteFolderResult.forgotten', { name }, 'success'
+                );
+            } else if (result.restorable) {
                 // A truly empty folder is reproducible one-for-one, so offer
                 // the same 20s undo affordance the model delete flow uses.
                 showActionToast('sidebar.deleteFolderResult.success', { name }, 'success', {
@@ -1987,6 +2258,41 @@ export class SidebarManager {
             return true;
         } catch (error) {
             console.error('[SidebarManager] Error deleting folder:', error);
+            this._reportDeleteFolderFailure(error);
+            return false;
+        }
+    }
+
+    /**
+     * Clear a folder node whose directory is gone from every root (issue #1145).
+     *
+     * A folder moved or deleted with a file manager leaves the sidebar holding a
+     * node that no delete can clear, because there is nothing left to remove. The
+     * delete affordance falls back to this instead of refusing: the backend drops
+     * the folder record and the cached models under it, and answers `exists` if
+     * the directory turned out to be back on disk (then it is a delete again).
+     */
+    async _forgetFolder(relativePath) {
+        if (
+            !this._supportsFolderManagement()
+            || typeof this.apiClient.forgetFolder !== 'function'
+        ) {
+            showToast('sidebar.deleteFolderResult.unsupported', {}, 'error');
+            return false;
+        }
+
+        try {
+            const result = await this.apiClient.forgetFolder(relativePath);
+            this._forgetRemovedFolder(relativePath);
+            await this.refresh();
+            showToast(
+                'sidebar.deleteFolderResult.forgotten',
+                { name: result.folder || relativePath },
+                'success'
+            );
+            return true;
+        } catch (error) {
+            console.error('[SidebarManager] Error forgetting folder:', error);
             this._reportDeleteFolderFailure(error);
             return false;
         }
@@ -3257,7 +3563,7 @@ export class SidebarManager {
     _migrateOldSettings() {
         if (getStorageItem('_sidebar_migration_done')) return;
 
-        const PAGES = ['loras', 'recipes', 'checkpoints', 'embeddings', 'other'];
+        const PAGES = ['loras', 'recipes', 'checkpoints', 'embeddings', 'other', 'workflows'];
 
         // 1. Migrate global hide setting to per-page
         if (state?.global?.settings?.show_folder_sidebar === false) {

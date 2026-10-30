@@ -22,15 +22,18 @@ from ..utils.models import (
     CheckpointMetadata,
     EmbeddingMetadata,
     OtherModelMetadata,
+    WorkflowMetadata,
 )
 from ..utils.constants import (
     CARD_PREVIEW_WIDTH,
+    CIVITAI_FILE_TYPE_TO_OTHER_SUB_TYPE,
     MAX_FOLDER_NAME_LENGTH,
     MAX_PATH_TAG_LENGTH,
     MODEL_WEIGHT_FILE_TYPES,
-    SUPPORTED_DOWNLOAD_SKIP_BASE_MODELS,
+    SUPPORTED_MEDIA_EXTENSIONS,
     VALID_LORA_TYPES,
     VALID_OTHER_CIVITAI_TYPES,
+    WORKFLOW_CIVITAI_TYPES,
 )
 from ..utils.civitai_utils import normalize_civitai_download_url, rewrite_preview_url
 from ..utils.paid_access import (
@@ -40,14 +43,18 @@ from ..utils.paid_access import (
     normalize_paid_access,
     parse_civitai_timestamp,
 )
-from ..utils.file_utils import calculate_sha256, calculate_autov3
+from ..utils.file_utils import calculate_sha256, calculate_autov3, detect_media_extension, reconcile_media_extension
 from ..utils.preview_selection import resolve_mature_threshold, select_preview_media
-from ..utils.utils import calculate_filename_for_model, sanitize_folder_name
+from ..utils.utils import calculate_filename_for_model, decode_percent_encoded_filename, fit_stem_to_path_budget, sanitize_folder_name
 from ..utils.exif_utils import ExifUtils
 from ..utils.metadata_manager import MetadataManager
 from ..utils.sidecar_paths import get_metadata_path, get_preview_dir
 from .service_registry import ServiceRegistry
-from .download_routing import is_diffusion_model_download, resolve_other_download_sub_type
+from .download_routing import (
+    is_diffusion_model_download,
+    resolve_download_root,
+    resolve_other_download_sub_type,
+)
 from .settings_manager import get_settings_manager
 from .metadata_service import get_default_metadata_provider, get_metadata_provider
 from .downloader import get_downloader, DownloadProgress, DownloadStreamControl
@@ -68,10 +75,14 @@ CIVITAI_DOWNLOAD_URL_PREFIXES = (
     "https://civitai.red/api/download/",
 )
 
-# Hosts a model download may hit (metadata + file transfer). The pre-flight
-# cooldown gate consults the RateLimitCoordinator for these before a download
-# occupies a concurrency slot.
-DOWNLOAD_PREFLIGHT_HOSTS = ("civitai.com", "civitai.red", "civarchive.com")
+# Hosts the pre-flight cooldown gate consults before a download occupies a
+# concurrency slot. civarchive.com is deliberately absent: a CivArchive-sourced
+# download can fall back to CivitAI for both metadata and file bytes, so a
+# cooldown armed by CivArchive API throttling must not hard-block it. The
+# CivArchive legs stay protected on their own — the metadata fetch goes
+# through the coordinator's wait_for_slot, and mirrors whose host is cooling
+# down are deprioritized once the concrete download URLs are known.
+DOWNLOAD_PREFLIGHT_HOSTS = ("civitai.com", "civitai.red")
 
 # Fallback retry_after when neither the vendor nor the coordinator can supply
 # a number (matches the Retry-After parsing default in downloader.py).
@@ -81,6 +92,35 @@ DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS = 60
 # File types that are never the intended download target even when CivitAI
 # marks them primary — configs/archives/workflows are auxiliary artifacts.
 NON_DOWNLOADABLE_PRIMARY_TYPES = ("Config", "Archive", "Workflow", "Training Data")
+
+
+def _other_models_disabled_response() -> Dict[str, Any]:
+    """Structured rejection when the Other Models feature is turned off.
+
+    The machine-readable ``reason`` is consumed by the companion browser
+    extension (docs/other-models-support.md C4); keep the value stable.
+    """
+    return {
+        "success": False,
+        "error": (
+            "Other Models management is disabled. Enable it in "
+            "Settings > Library before downloading VAE, upscaler, "
+            "text encoder or CLIP files."
+        ),
+        "reason": "other_models_disabled",
+    }
+
+
+def _workflows_disabled_response() -> Dict[str, Any]:
+    """Structured rejection when Workflow management is turned off."""
+    return {
+        "success": False,
+        "error": (
+            "Workflow management is disabled. Enable it in "
+            "Settings > Library before downloading workflow files."
+        ),
+        "reason": "workflows_disabled",
+    }
 
 
 @dataclass
@@ -262,10 +302,16 @@ class DownloadManager:
         """Fail fast when a download target host is in a rate-limit cooldown.
 
         Consults the RateLimitCoordinator's per-host cooldown state for the
-        hosts a model download may hit. Runs BEFORE the concurrency semaphore
+        hosts this download may hit. Runs BEFORE the concurrency semaphore
         is acquired so queued items never occupy a slot during a 429 episode.
         Deliberately non-blocking: the caller is expected to pace itself (the
         companion extension auto-pauses on the structured 429 response).
+
+        Only the CivitAI hosts are gated here. civarchive.com is not: a
+        CivArchive-sourced download can still resolve metadata and file bytes
+        from CivitAI, and the CivArchive-specific legs are gated separately
+        (metadata fetch via ``wait_for_slot``, mirrors via
+        ``_deprioritize_cooled_down_urls``).
         """
         coordinator = await RateLimitCoordinator.get_instance()
         worst_host: Optional[str] = None
@@ -368,6 +414,8 @@ class DownloadManager:
             return await ServiceRegistry.get_embedding_scanner()
         if model_type == "other":
             return await ServiceRegistry.get_other_scanner()
+        if model_type == "workflow":
+            return await ServiceRegistry.get_workflow_scanner()
         if model_type == "lora":
             return await self._get_lora_scanner()
         raise ValueError(f'Unknown model type "{model_type}"')
@@ -453,6 +501,37 @@ class DownloadManager:
                 break
 
         return file_info
+
+    @staticmethod
+    def _select_workflow_download_file(
+        files: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Pick the workflow artifact within a workflow version's file list.
+
+        Workflow versions ship no weight files, so the generic
+        primary/weights selection finds nothing. The ranking mirrors
+        CivitAI's own default pick for Workflow resources (a single-workflow
+        Config .json first, then an Archive .zip, then an image carrying an
+        embedded workflow), with CivitAI's primary flag breaking ties.
+        """
+
+        def rank(file_info: Dict[str, Any]) -> int:
+            name = str(file_info.get("name") or "").lower()
+            if name.endswith(".json"):
+                return 0
+            if name.endswith(".zip"):
+                return 1
+            if name.endswith((".png", ".webp")):
+                return 2
+            return 3
+
+        candidates = [f for f in files or [] if isinstance(f, dict)]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda f: (not bool(f.get("primary")), rank(f), f.get("id") or 0)
+        )
+        return candidates[0]
 
     async def _find_local_file_entry(
         self,
@@ -1082,6 +1161,38 @@ class DownloadManager:
 
         return download_urls
 
+    async def _deprioritize_cooled_down_urls(
+        self, download_urls: List[str]
+    ) -> List[str]:
+        """Move mirrors whose host is in a rate-limit cooldown to the end.
+
+        The transfer loop tries URLs in order and a cooled-down first URL
+        would raise a structured 429 instead of falling through, so a cooldown
+        armed on one mirror host (e.g. civarchive.com after its API throttled
+        us) must not hold up the download while another mirror can serve the
+        file immediately. Order within each group is preserved. When every
+        host is cooling down the list is returned unchanged and the transfer's
+        own rate-limit handling decides (wait within the cap, else structured
+        429 and re-queue).
+        """
+        if len(download_urls) < 2:
+            return download_urls
+        coordinator = await RateLimitCoordinator.get_instance()
+        cooled: List[str] = []
+        ready: List[str] = []
+        for url in download_urls:
+            if coordinator.remaining_seconds(self._url_host(url)) > 0:
+                cooled.append(url)
+            else:
+                ready.append(url)
+        if not ready or not cooled:
+            return download_urls
+        logger.info(
+            "Deprioritizing mirrors on cooled-down hosts: %s",
+            sorted({self._url_host(url) for url in cooled}),
+        )
+        return ready + cooled
+
     async def _fetch_raw_file_name(
         self,
         metadata_provider,
@@ -1132,6 +1243,8 @@ class DownloadManager:
             return EmbeddingMetadata.from_civitai_info(version_info, file_info, save_path)
         if model_type == "other":
             return OtherModelMetadata.from_civitai_info(version_info, file_info, save_path)
+        if model_type == "workflow":
+            return WorkflowMetadata.from_civitai_info(version_info, file_info, save_path)
         return LoraMetadata.from_civitai_info(version_info, file_info, save_path)
 
     def _resolve_save_path_from_persisted_record(self, record: Dict[str, Any]) -> Optional[str]:
@@ -1197,6 +1310,9 @@ class DownloadManager:
                     if not download_urls:
                         result = {"success": False, "error": "No mirror URL found"}
                     else:
+                        download_urls = await self._deprioritize_cooled_down_urls(
+                            download_urls
+                        )
                         result = await self._execute_download(
                             download_urls=download_urls,
                             save_dir=save_dir,
@@ -1480,6 +1596,23 @@ class DownloadManager:
 
             self._restored_persisted_downloads = True
 
+    @staticmethod
+    def _resolve_rule_routed_root(
+        rule_key: str,
+        base_model: str,
+        default_root: str,
+        tags=None,
+    ) -> str:
+        """Apply download_root_rules for the final model type's folder key.
+
+        ``rule_key`` is a folder_paths key ("loras"/"checkpoints"/"unet"/
+        "embeddings") — a checkpoint download routed to the unet roots
+        consults the "unet" rules. ``tags`` are the model's CivitAI tags,
+        used by rules with ``match_type == "tag"``.
+        """
+        rules = get_settings_manager().get_download_root_rules().get(rule_key)
+        return resolve_download_root(rules, base_model, default_root, tags=tags)
+
     async def _resolve_download_target_path(
         self,
         save_dir: str,
@@ -1624,6 +1757,17 @@ class DownloadManager:
                         "error": "Model version already exists in other library",
                     }
 
+                # Check workflow scanner (opt-in feature)
+                if get_settings_manager().is_workflows_enabled():
+                    workflow_scanner = await ServiceRegistry.get_workflow_scanner()
+                    if await workflow_scanner.check_model_version_exists(
+                        model_version_id
+                    ):
+                        return {
+                            "success": False,
+                            "error": "Model version already exists in workflow library",
+                        }
+
             # Use CivArchive provider directly when source is 'civarchive'
             # This prioritizes CivArchive metadata (with mirror availability info) over Civitai
             if source == "civarchive":
@@ -1637,9 +1781,22 @@ class DownloadManager:
                 metadata_provider = await get_default_metadata_provider()
 
             # Get version info based on the provided identifier
-            version_info = await metadata_provider.get_model_version(
-                cast(int, model_id), cast(int, model_version_id)
-            )
+            civarchive_rate_limit: Optional[RateLimitError] = None
+            try:
+                version_info = await metadata_provider.get_model_version(
+                    cast(int, model_id), cast(int, model_version_id)
+                )
+            except RateLimitError as exc:
+                if source != "civarchive":
+                    raise
+                # A CivArchive cooldown must not block models that still live
+                # on CivitAI: fall back to the default provider below and only
+                # re-raise if that yields nothing either (archive-only model).
+                logger.info(
+                    "CivArchive metadata fetch rate limited, trying default provider"
+                )
+                civarchive_rate_limit = exc
+                version_info = None
 
             if not version_info:
                 # If CivArchive provider failed and source was 'civarchive', try default provider as fallback
@@ -1653,38 +1810,13 @@ class DownloadManager:
                     )
 
             if not version_info:
+                if civarchive_rate_limit is not None:
+                    # Archive-only model and CivArchive is cooling down: keep
+                    # the structured 429 so the download is re-queued, not failed.
+                    raise civarchive_rate_limit
                 return {"success": False, "error": "Failed to fetch model metadata"}
 
             model_type_from_info = version_info.get("model", {}).get("type", "").lower()
-            # CivitAI ModelType has no model-level diffusion variant: DiT
-            # models are uploaded as "Checkpoint" or "UNet". Both go through
-            # the checkpoint branch so the standard diffusion routing chain
-            # (file type -> baseModel lists -> unknown default) applies.
-            if model_type_from_info in ("checkpoint", "unet"):
-                model_type = "checkpoint"
-            elif model_type_from_info in VALID_LORA_TYPES:
-                model_type = "lora"
-            elif model_type_from_info == "textualinversion":
-                model_type = "embedding"
-            elif model_type_from_info in VALID_OTHER_CIVITAI_TYPES:
-                if not get_settings_manager().is_other_models_enabled():
-                    return {
-                        "success": False,
-                        "error": (
-                            "Other Models management is disabled. Enable it in "
-                            "Settings > Library before downloading VAE, upscaler, "
-                            "text encoder or CLIP files."
-                        ),
-                        # Machine-readable failure code consumed by the companion
-                        # browser extension (docs/other-models-support.md C4).
-                        "reason": "other_models_disabled",
-                    }
-                model_type = "other"
-            else:
-                return {
-                    "success": False,
-                    "error": f'Model type "{model_type_from_info}" is not supported for download',
-                }
 
             resolved_version_id = model_version_id
             raw_version_id = version_info.get("id")
@@ -1710,6 +1842,56 @@ class DownloadManager:
                         resolved_version_id,
                     )
             explicit_file = target_file is not None
+
+            # file_type_routing is an explicit caller opt-in (companion browser
+            # extension): when the resolved file's CivitAI file.type maps to an
+            # other-model sub_type and model.type itself is not an other type
+            # (e.g. a VAE file bundled on a Checkpoint model page), reroute the
+            # download through the other-models pipeline. The locked default is
+            # unchanged: without the flag, file.type never overrides model.type
+            # (see resolve_other_download_sub_type in download_routing.py).
+            file_type_reroute = (
+                explicit_file
+                and file_params is not None
+                and bool(file_params.get("file_type_routing"))
+                and model_type_from_info not in VALID_OTHER_CIVITAI_TYPES
+                and target_file.get("type") in CIVITAI_FILE_TYPE_TO_OTHER_SUB_TYPE
+            )
+
+            # CivitAI ModelType has no model-level diffusion variant: DiT
+            # models are uploaded as "Checkpoint" or "UNet". Both go through
+            # the checkpoint branch so the standard diffusion routing chain
+            # (file type -> baseModel lists -> unknown default) applies.
+            if file_type_reroute:
+                if not get_settings_manager().is_other_models_enabled():
+                    return _other_models_disabled_response()
+                model_type = "other"
+                logger.info(
+                    "[download] file_type_routing: file type '%s' reroutes "
+                    "model version %s (model.type '%s') to the other-models pipeline",
+                    target_file.get("type"),
+                    resolved_version_id,
+                    model_type_from_info,
+                )
+            elif model_type_from_info in ("checkpoint", "unet"):
+                model_type = "checkpoint"
+            elif model_type_from_info in VALID_LORA_TYPES:
+                model_type = "lora"
+            elif model_type_from_info == "textualinversion":
+                model_type = "embedding"
+            elif model_type_from_info in VALID_OTHER_CIVITAI_TYPES:
+                if not get_settings_manager().is_other_models_enabled():
+                    return _other_models_disabled_response()
+                model_type = "other"
+            elif model_type_from_info in WORKFLOW_CIVITAI_TYPES:
+                if not get_settings_manager().is_workflows_enabled():
+                    return _workflows_disabled_response()
+                model_type = "workflow"
+            else:
+                return {
+                    "success": False,
+                    "error": f'Model type "{model_type_from_info}" is not supported for download',
+                }
 
             if (
                 not explicit_file
@@ -1757,11 +1939,19 @@ class DownloadManager:
 
             excluded_base_models = get_settings_manager().get_download_skip_base_models()
             base_model_value = version_info.get("baseModel", "")
-            if (
-                isinstance(base_model_value, str)
-                and base_model_value in SUPPORTED_DOWNLOAD_SKIP_BASE_MODELS
-                and base_model_value in excluded_base_models
-            ):
+            # Model-level CivitAI tags, used by download_root_rules with
+            # match_type "tag" (same source as _calculate_relative_path's
+            # {first_tag} placeholder).
+            model_info = version_info.get("model")
+            model_tags = (
+                model_info.get("tags") or []
+                if isinstance(model_info, dict)
+                else []
+            )
+            # excluded_base_models is already validated against the merged
+            # base-model vocabulary by the settings manager, so membership in
+            # the user exclusion list is sufficient here.
+            if isinstance(base_model_value, str) and base_model_value in excluded_base_models:
                 file_name = ""
                 files = version_info.get("files")
                 if isinstance(files, list):
@@ -1876,6 +2066,13 @@ class DownloadManager:
                             "success": False,
                             "error": "Model version already exists in other library",
                         }
+                elif model_type == "workflow":
+                    workflow_scanner = await ServiceRegistry.get_workflow_scanner()
+                    if await workflow_scanner.check_model_version_exists(version_id):
+                        return {
+                            "success": False,
+                            "error": "Model version already exists in workflow library",
+                        }
 
             # Handle use_default_paths
             if use_default_paths:
@@ -1890,15 +2087,19 @@ class DownloadManager:
                         if is_diffusion_model:
                             default_path = settings_manager.get("default_unet_root")
                             error_msg = "Default unet root path not set in settings"
+                            rule_key = "unet"
                         else:
                             default_path = settings_manager.get("default_checkpoint_root")
                             error_msg = "Default checkpoint root path not set in settings"
+                            rule_key = "checkpoints"
                         if not default_path:
                             return {
                                 "success": False,
                                 "error": error_msg,
                             }
-                        save_dir = default_path
+                        save_dir = self._resolve_rule_routed_root(
+                            rule_key, base_model_value, default_path, tags=model_tags
+                        )
                     elif model_type == "lora":
                         default_path = settings_manager.get("default_lora_root")
                         if not default_path:
@@ -1906,7 +2107,9 @@ class DownloadManager:
                                 "success": False,
                                 "error": "Default lora root path not set in settings",
                             }
-                        save_dir = default_path
+                        save_dir = self._resolve_rule_routed_root(
+                            "loras", base_model_value, default_path, tags=model_tags
+                        )
                     elif model_type == "embedding":
                         default_path = settings_manager.get("default_embedding_root")
                         if not default_path:
@@ -1914,7 +2117,9 @@ class DownloadManager:
                                 "success": False,
                                 "error": "Default embedding root path not set in settings",
                             }
-                        save_dir = default_path
+                        save_dir = self._resolve_rule_routed_root(
+                            "embeddings", base_model_value, default_path, tags=model_tags
+                        )
                     elif model_type == "other":
                         other_sub_type = resolve_other_download_sub_type(
                             model_type_from_info,
@@ -1969,6 +2174,20 @@ class DownloadManager:
                                 "reason": reason,
                             }
                         save_dir = default_path
+                    elif model_type == "workflow":
+                        # Workflows have no default-root setting: the first
+                        # configured workflow root is the download target.
+                        workflow_scanner = await ServiceRegistry.get_workflow_scanner()
+                        workflow_roots = workflow_scanner.get_model_roots()
+                        if not workflow_roots:
+                            return {
+                                "success": False,
+                                "error": (
+                                    "No workflow folder configured. Add one in "
+                                    "Settings > Library before downloading workflows."
+                                ),
+                            }
+                        save_dir = workflow_roots[0]
 
                 # Calculate relative path using template
                 relative_path = self._calculate_relative_path(version_info, model_type)
@@ -2060,6 +2279,14 @@ class DownloadManager:
                 )
 
             # Fallback to primary file if no match found
+            if not file_info and model_type == "workflow":
+                file_info = self._select_workflow_download_file(files)
+                if file_info:
+                    logger.debug(
+                        "[download] Workflow file selected: id=%s, name=%s",
+                        file_info.get("id"), file_info.get("name"),
+                    )
+
             if not file_info:
                 logger.debug("[download] Looking for primary file as fallback")
                 # Prefer a weights-type file CivitAI marked primary; then any
@@ -2117,6 +2344,8 @@ class DownloadManager:
             if not download_urls:
                 return {"success": False, "error": "No mirror URL found"}
 
+            download_urls = await self._deprioritize_cooled_down_urls(download_urls)
+
             # The public REST API rewrites files[].name to
             # "{model}_{version}" for non-LoRA model types, so every
             # precision variant of a multi-file version shares one name and
@@ -2139,6 +2368,43 @@ class DownloadManager:
             file_name = file_info.get("name", "")
             if not file_name:
                 return {"success": False, "error": "No filename found in file info"}
+            # CivitAI stores non-ASCII file names percent-encoded; the mini
+            # endpoint (and CivArchive) return that raw stored name, which
+            # must be decoded before it becomes the on-disk name — otherwise
+            # the literal "%E7%8A%AC..." string lands on the filesystem.
+            decoded_file_name = decode_percent_encoded_filename(file_name)
+            if decoded_file_name != file_name:
+                logger.info(
+                    "[download] Decoded percent-encoded filename '%s' to '%s'",
+                    file_name,
+                    decoded_file_name,
+                )
+                file_name = decoded_file_name
+                file_info = {**file_info, "name": file_name}
+            # Raw stored filenames carry no length cap, and the fixed stem
+            # cap only applies to template renames; trim to the real path
+            # budget (model path and sidecar mirror alike) so the target
+            # stays writable on Windows (#1142).
+            file_stem, file_ext = os.path.splitext(file_name)
+            fitted_stem = fit_stem_to_path_budget(save_dir, file_stem, file_ext)
+            if not fitted_stem:
+                return {
+                    "success": False,
+                    "error": (
+                        "Download target path would exceed the OS path length "
+                        "limit. Choose a shallower destination folder."
+                    ),
+                }
+            if fitted_stem != file_stem:
+                logger.info(
+                    "[download] Truncating filename '%s' to fit the path length limit",
+                    file_name,
+                )
+                # Rewrite file_info like the raw-name lookup above (#1100):
+                # from this point the name is the on-disk identity, which is
+                # what metadata, history and the scanner all agree on.
+                file_name = fitted_stem + file_ext
+                file_info = {**file_info, "name": file_name}
             save_path = os.path.join(save_dir, file_name)
 
             # 5. Prepare metadata based on model type
@@ -2162,6 +2428,11 @@ class DownloadManager:
                     version_info, file_info, save_path
                 )
                 logger.info(f"Creating OtherModelMetadata for {file_name}")
+            elif model_type == "workflow":
+                metadata = WorkflowMetadata.from_civitai_info(
+                    version_info, file_info, save_path
+                )
+                logger.info(f"Creating WorkflowMetadata for {file_name}")
             else:
                 return {
                     "success": False,
@@ -2380,6 +2651,8 @@ class DownloadManager:
                 scanner = await ServiceRegistry.get_embedding_scanner()
             elif model_type == "other":
                 scanner = await ServiceRegistry.get_other_scanner()
+            elif model_type == "workflow":
+                scanner = await ServiceRegistry.get_workflow_scanner()
         except Exception as exc:
             logger.debug("Failed to acquire scanner for %s models: %s", model_type, exc)
 
@@ -2666,6 +2939,7 @@ class DownloadManager:
                                 attempt, preview_path, use_auth=False
                             )
                             if success:
+                                preview_path = reconcile_media_extension(preview_path)
                                 preview_downloaded = True
                                 break
                     else:
@@ -2673,16 +2947,29 @@ class DownloadManager:
                             preview_url, media_type="image"
                         )
                         if rewritten and rewritten_url:
-                            preview_ext = _extension_from_url(preview_url, ".png")
-                            preview_path = os.path.join(
-                                get_preview_dir(save_path),
-                                os.path.splitext(os.path.basename(save_path))[0] + preview_ext,
+                            # Civitai's optimized renditions are re-encoded
+                            # (typically WebP) regardless of the URL's
+                            # extension, so the saved extension must come from
+                            # the actual bytes/headers.
+                            (
+                                success,
+                                content,
+                                headers,
+                            ) = await downloader.download_to_memory(
+                                rewritten_url, use_auth=False, return_headers=True
                             )
-                            success, _ = await downloader.download_file(
-                                rewritten_url, preview_path, use_auth=False
-                            )
-                            if success:
-                                preview_downloaded = True
+                            if success and isinstance(content, bytes):
+                                preview_ext = detect_media_extension(
+                                    content, headers, fallback_url=preview_url
+                                )
+                                if preview_ext in SUPPORTED_MEDIA_EXTENSIONS["images"]:
+                                    preview_path = os.path.join(
+                                        get_preview_dir(save_path),
+                                        os.path.splitext(os.path.basename(save_path))[0] + preview_ext,
+                                    )
+                                    with open(preview_path, "wb") as preview_file:
+                                        preview_file.write(content)
+                                    preview_downloaded = True
 
                         if not preview_downloaded:
                             temp_path: str | None = None
@@ -2836,7 +3123,11 @@ class DownloadManager:
 
             # 4. Handle archive extraction and prepare per-file metadata
             actual_file_paths = [save_path]
-            if zipfile.is_zipfile(save_path):
+            # Workflow downloads never extract archives: the zip IS the
+            # artifact, kept byte-identical so its SHA256 stays the CivitAI
+            # identity; the workflow document is materialized into a derived
+            # sidecar by the scanner instead.
+            if model_type != "workflow" and zipfile.is_zipfile(save_path):
                 supported_extensions = self._get_supported_extensions_for_type(
                     model_type
                 )
@@ -2900,6 +3191,9 @@ class DownloadManager:
             elif model_type == "other":
                 scanner = await ServiceRegistry.get_other_scanner()
                 logger.info(f"Updating other-model cache for {actual_file_paths[0]}")
+            elif model_type == "workflow":
+                scanner = await ServiceRegistry.get_workflow_scanner()
+                logger.info(f"Updating workflow cache for {actual_file_paths[0]}")
 
             adjust_cached_entry = (
                 getattr(scanner, "adjust_cached_entry", None)
@@ -3036,8 +3330,12 @@ class DownloadManager:
                 if not isinstance(file_path, str) or not file_path:
                     continue
 
-                new_stem = calculate_filename_for_model(metadata_dict, model_type)
+                new_stem = calculate_filename_for_model(
+                    metadata_dict, model_type, target_dir=os.path.dirname(file_path)
+                )
                 if not new_stem:
+                    # An empty stem here also covers "no viable name fits the
+                    # path budget": keep the name already on disk.
                     continue
 
                 current_stem = os.path.splitext(os.path.basename(file_path))[0]
@@ -3128,8 +3426,24 @@ class DownloadManager:
                     file_name = os.path.basename(info.filename)
                     if not file_name:
                         continue
+                    # Archive member names come from the uploader uncapped;
+                    # fit each to the destination budget like any other
+                    # download target so the create cannot fail with
+                    # ENAMETOOLONG (a CJK-heavy member name passes every
+                    # character cap yet still overflows NAME_MAX in bytes).
+                    member_stem, member_ext = os.path.splitext(file_name)
+                    fitted_stem = fit_stem_to_path_budget(
+                        target_dir, member_stem, member_ext
+                    )
+                    if not fitted_stem:
+                        logger.warning(
+                            "Skipping archive member whose name cannot fit the "
+                            "destination path budget: %s",
+                            file_name,
+                        )
+                        continue
                     dest_path = self._resolve_extracted_destination(
-                        target_dir, file_name
+                        target_dir, fitted_stem + member_ext
                     )
                     with archive.open(info) as source, open(dest_path, "wb") as target:
                         shutil.copyfileobj(source, target)

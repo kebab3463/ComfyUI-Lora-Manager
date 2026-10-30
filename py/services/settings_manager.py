@@ -2,7 +2,6 @@ import asyncio
 import copy
 import json
 import os
-import posixpath
 import shutil
 import tempfile
 import logging
@@ -30,12 +29,14 @@ from ..utils.constants import (
     DEFAULT_ENABLED_OTHER_SUB_TYPES,
     DEFAULT_HASH_CHUNK_SIZE_MB,
     DEFAULT_PRIORITY_TAG_CONFIG,
+    DOWNLOAD_ROOT_RULE_FOLDER_KEYS,
     OTHER_SUB_TYPE_FOLDER_KEYS,
     SUPPORTED_DOWNLOAD_SKIP_BASE_MODELS,
     VALID_OTHER_SUB_TYPES,
     normalize_other_sub_types,
 )
 from ..utils.preview_selection import VALID_MATURE_BLUR_LEVELS
+from ..utils.root_paths import normalize_root_identity
 from ..utils.settings_paths import (
     APP_NAME,
     _portable_env_override,
@@ -54,6 +55,27 @@ from ..utils.tag_priorities import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_supported_base_models() -> Set[str]:
+    """Return the best-known base-model vocabulary for settings validation.
+
+    Prefers the merged CivitAI vocabulary (hardcoded list plus the last
+    fetched remote snapshot) so newly released base models are accepted;
+    falls back to the hardcoded constant when the service is unavailable.
+    """
+    try:
+        from .civitai_base_model_service import get_known_base_models
+
+        known = get_known_base_models()
+        if known:
+            return known
+    except Exception:
+        logger.debug(
+            "Falling back to hardcoded base model list for settings validation",
+            exc_info=True,
+        )
+    return set(SUPPORTED_DOWNLOAD_SKIP_BASE_MODELS)
 
 
 CORE_USER_SETTING_KEYS: Tuple[str, ...] = (
@@ -76,6 +98,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "language": "en",
     "show_only_sfw": False,
     "onboarding_completed": False,
+    # First-run gate: until the user confirms the welcome page, the initial
+    # library scan is deferred (see py/services/first_run_manager.py).
+    "initial_scan_completed": False,
+    # Set when the first scan starts from the welcome page; the frontend
+    # consumes it to show the one-shot "fetch metadata for your library"
+    # banner once the scan finishes, then clears it.
+    "bulk_fetch_prompt_pending": False,
     "dismissed_banners": [],
     "enable_metadata_archive_db": False,
     "enable_civarchive_api": True,
@@ -101,6 +130,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # for download until the user turns the feature on.
     "enable_other_models": False,
     "enabled_other_sub_types": list(DEFAULT_ENABLED_OTHER_SUB_TYPES),
+    # Workflow management is likewise opt-in (ComfyUI workflow JSON library).
+    "enable_workflows": False,
     "recipes_path": "",
     "sidecar_storage_mode": "alongside",
     "sidecar_storage_path": "",
@@ -127,8 +158,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "priority_tags": DEFAULT_PRIORITY_TAG_CONFIG.copy(),
     "model_name_display": "model_name",
     "lora_syntax_format": "legacy",
+    # Remap legacy 28-block Anima LoRA keys onto the block layout of the
+    # connected Anima 2.9B (40) or 3.8B (52) model. Enabled by default because
+    # the raw LoRA otherwise lands on the wrong layers without any warning.
+    "anima_lora_block_remap": True,
     "model_card_footer_action": "replace_preview",
     "show_version_on_card": True,
+    "show_quantization_on_card": True,
     "version_grouping": "same_base",
     # Buzz price tracking for paid/early-access versions. Opt-in because reading a
     # price costs one extra (public) model-page request per gated model.
@@ -138,8 +174,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "price_check_ttl_hours": 24,
     "auto_organize_exclusions": [],
     "metadata_refresh_skip_paths": [],
+    # Send-to-Workflow target filtering: candidate nodes whose comfy class or
+    # title matches these lists are hidden from the target selector. Nodes
+    # explicitly marked via right-click ("Mark as") are exempt.
+    "send_to_workflow_exclusions": {"node_classes": [], "title_patterns": []},
     "skip_previously_downloaded_model_versions": False,
     "download_skip_base_models": [],
+    # Ordered per-type rules routing downloads to a non-default root by base
+    # model; the first matching rule wins, unmatched downloads use default_*_root.
+    "download_root_rules": {key: [] for key in DOWNLOAD_ROOT_RULE_FOLDER_KEYS},
     # Routing target for checkpoint downloads whose baseModel is neither a
     # known diffusion model nor a known full checkpoint (CHECKPOINT_BASE_MODELS).
     "unknown_base_model_routing": "diffusion_model",
@@ -154,15 +197,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "llm_api_base": "",  # empty = provider default
     "llm_model": "",  # e.g. "gpt-4o-mini"
 }
-
-
-def _normalize_root_identity(path: str) -> str:
-    """Normalize a root path for equality checks across slash styles."""
-
-    normalized = posixpath.normpath(path.strip().replace("\\", "/"))
-    if len(normalized) >= 2 and normalized[1] == ":":
-        return normalized.lower()
-    return normalized
 
 
 class SettingsManager:
@@ -436,6 +470,19 @@ class SettingsManager:
             self.settings["download_skip_base_models"] = []
             inserted_defaults = True
 
+        if "download_root_rules" in self.settings:
+            normalized_root_rules = self.normalize_download_root_rules(
+                self.settings.get("download_root_rules")
+            )
+            if normalized_root_rules != self.settings.get("download_root_rules"):
+                self.settings["download_root_rules"] = normalized_root_rules
+                updated_existing = True
+        else:
+            self.settings["download_root_rules"] = {
+                key: [] for key in DOWNLOAD_ROOT_RULE_FOLDER_KEYS
+            }
+            inserted_defaults = True
+
         if "skip_previously_downloaded_model_versions" not in self.settings:
             self.settings["skip_previously_downloaded_model_versions"] = False
             inserted_defaults = True
@@ -582,6 +629,39 @@ class SettingsManager:
         self._sync_active_library_to_root(save=changed and not initial_bootstrap)
         if changed and initial_bootstrap:
             self._needs_initial_save = True
+
+        self._warn_if_multi_library()
+
+    def _warn_if_multi_library(self) -> None:
+        """Surface a deprecation notice when more than one library is configured."""
+        libraries = self.settings.get("libraries", {})
+        if not isinstance(libraries, Mapping) or len(libraries) <= 1:
+            return
+
+        names = ", ".join(sorted(str(name) for name in libraries))
+        logger.warning(
+            "Multi-library support is deprecated and will be removed in an "
+            "upcoming release. Detected %d libraries in settings.json (%s). "
+            "Multiple folder roots within a single library remain fully "
+            "supported; please consolidate your libraries into one.",
+            len(libraries),
+            names,
+        )
+        self._add_startup_message(
+            code="multi-library-deprecated",
+            title="Multi-library support is deprecated",
+            message=(
+                f"This installation has {len(libraries)} libraries configured in "
+                f"settings.json ({names}). Multi-library support is deprecated and "
+                "will be removed in an upcoming release; at that point all "
+                "libraries' folder paths will be merged into a single library. "
+                "Multiple folder roots within a single library remain fully "
+                "supported, so consider consolidating into one library now."
+            ),
+            severity="warning",
+            actions=self._default_settings_actions(),
+            dismissible=True,
+        )
 
     def _sync_active_library_to_root(self, *, save: bool = False) -> None:
         """Update top-level folder path settings to mirror the active library."""
@@ -745,6 +825,40 @@ class SettingsManager:
         """Return True when the opt-in Other Models management is enabled."""
         return bool(self.settings.get("enable_other_models", False))
 
+    def is_workflows_enabled(self) -> bool:
+        """Return True when the opt-in Workflow management is enabled."""
+        return bool(self.settings.get("enable_workflows", False))
+
+    def get_workflow_folder_paths(self) -> List[str]:
+        """Workflow roots configured for the active library (normalized)."""
+        folder_paths = self.settings.get("folder_paths", {})
+        if not isinstance(folder_paths, Mapping):
+            return []
+        normalized = self._normalize_folder_paths(
+            {"workflows": folder_paths.get("workflows", [])}
+        )
+        return normalized.get("workflows", [])
+
+    def set_workflow_folder_paths(self, paths: Any) -> List[str]:
+        """Replace the active library's workflow roots and apply them live.
+
+        Unlike the core folder_paths keys (host-owned in plugin mode, applied
+        on restart in standalone), workflow roots are LoRA-Manager-only in
+        both modes, so they merge into the stored folder_paths map and take
+        effect immediately via ``_apply_workflow_settings_change``.
+        """
+        normalized = self._normalize_folder_paths({"workflows": paths}).get(
+            "workflows", []
+        )
+        folder_paths = dict(self.settings.get("folder_paths") or {})
+        if normalized:
+            folder_paths["workflows"] = normalized
+        else:
+            folder_paths.pop("workflows", None)
+        self.set("folder_paths", folder_paths)
+        self._apply_workflow_settings_change()
+        return normalized
+
     def get_enabled_other_sub_types(self) -> List[str]:
         """Return the enabled other-model sub_types (empty when the feature is off)."""
         if not self.is_other_models_enabled():
@@ -776,6 +890,28 @@ class SettingsManager:
                 scanner.on_library_changed(reconcile=True)
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.debug("Failed to refresh other scanner after settings change: %s", exc)
+
+    def _apply_workflow_settings_change(self) -> None:
+        """Rebuild workflow roots and refresh the workflow scanner after a toggle."""
+        try:
+            from ..config import config  # Local import to avoid circular dependency
+
+            config.refresh_workflow_roots()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("Failed to refresh workflow roots: %s", exc)
+
+        try:
+            from .service_registry import ServiceRegistry  # pyright: ignore[reportImportCycles]
+
+            scanner = ServiceRegistry.get_service_sync("workflow_scanner")
+            if scanner is not None and hasattr(scanner, "on_library_changed"):
+                # reconcile=True lets the scanner pick up newly enabled roots and
+                # purge rows for folders that are no longer managed.
+                scanner.on_library_changed(reconcile=True)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug(
+                "Failed to refresh workflow scanner after settings change: %s", exc
+            )
 
     def _has_configured_paths(self, folder_paths: Any) -> bool:
         if not isinstance(folder_paths, Mapping):
@@ -1025,7 +1161,7 @@ class SettingsManager:
                 return False
 
             allowed_roots = self._get_allowed_roots(key)
-            if current and _normalize_root_identity(current) in allowed_roots:
+            if current and normalize_root_identity(current) in allowed_roots:
                 return False
 
             self.settings[setting_key] = primary_candidates[0]
@@ -1061,7 +1197,7 @@ class SettingsManager:
                 candidate_identities: set[str] = set()
                 for folder_key in OTHER_SUB_TYPE_FOLDER_KEYS.get(sub_type, []):
                     for candidate in self._get_valid_root_candidates(folder_key):
-                        identity = _normalize_root_identity(candidate)
+                        identity = normalize_root_identity(candidate)
                         if identity in candidate_identities:
                             continue
                         candidate_identities.add(identity)
@@ -1069,7 +1205,7 @@ class SettingsManager:
                 if not candidates:
                     continue
                 current = other_roots.get(sub_type, "")
-                if current and _normalize_root_identity(current) in candidate_identities:
+                if current and normalize_root_identity(current) in candidate_identities:
                     continue
                 other_roots[sub_type] = candidates[0]
                 if current:
@@ -1119,7 +1255,7 @@ class SettingsManager:
                 normalized = value.strip()
                 if not normalized:
                     continue
-                identity = _normalize_root_identity(normalized)
+                identity = normalize_root_identity(normalized)
                 if identity in seen:
                     continue
                 seen.add(identity)
@@ -1129,7 +1265,7 @@ class SettingsManager:
     def _get_allowed_roots(self, key: str) -> set[str]:
         """Return all valid roots for a model type, including extra roots."""
 
-        return {_normalize_root_identity(path) for path in self._get_valid_root_candidates(key)}
+        return {normalize_root_identity(path) for path in self._get_valid_root_candidates(key)}
 
     def _check_environment_variables(self) -> None:
         """Check for environment variables and update settings if needed"""
@@ -1450,11 +1586,12 @@ class SettingsManager:
 
         base_models: List[str] = []
         seen = set()
+        allowed = _get_supported_base_models()
         for raw in candidates:
             if not isinstance(raw, str):
                 continue
             token = raw.strip()
-            if not token or token not in SUPPORTED_DOWNLOAD_SKIP_BASE_MODELS:
+            if not token or token not in allowed:
                 continue
             if token in seen:
                 continue
@@ -1471,6 +1608,110 @@ class SettingsManager:
             self.settings["download_skip_base_models"] = base_models
             self._save_settings()
         return base_models
+
+    def normalize_download_root_rules(
+        self, value: Any
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Normalize a ``download_root_rules`` payload.
+
+        Fault-tolerant like the other settings normalizers: unknown type keys,
+        malformed entries and unknown match types are dropped silently;
+        ``base_model`` rules keep only values from the merged CivitAI
+        base-model vocabulary (hardcoded list plus the last fetched remote
+        snapshot) while ``tag`` rules accept any free-text tag (trimmed,
+        case-insensitively deduplicated); a rule whose root is not one of the
+        configured roots for its type (folder_paths + extra_folder_paths) is
+        dropped with a warning.
+        """
+        normalized: Dict[str, List[Dict[str, Any]]] = {
+            key: [] for key in DOWNLOAD_ROOT_RULE_FOLDER_KEYS
+        }
+        if not isinstance(value, Mapping):
+            return normalized
+
+        supported_base_models: Optional[Set[str]] = None
+
+        for key, raw_rules in value.items():
+            if key not in DOWNLOAD_ROOT_RULE_FOLDER_KEYS:
+                continue
+            if not isinstance(raw_rules, Sequence) or isinstance(
+                raw_rules, (str, bytes, bytearray)
+            ):
+                continue
+            allowed_roots = self._get_allowed_roots(key)
+            for raw_rule in raw_rules:
+                if not isinstance(raw_rule, Mapping):
+                    continue
+                match_type = raw_rule.get("match_type")
+                if match_type not in ("base_model", "tag"):
+                    logger.warning(
+                        "Dropping download root rule for %s: unsupported match_type %r",
+                        key,
+                        match_type,
+                    )
+                    continue
+                match = raw_rule.get("match")
+                if not isinstance(match, Sequence) or isinstance(
+                    match, (str, bytes, bytearray)
+                ):
+                    continue
+                matched_values: List[str] = []
+                seen = set()
+                for candidate in match:
+                    if not isinstance(candidate, str):
+                        continue
+                    token = candidate.strip()
+                    if not token:
+                        continue
+                    if match_type == "base_model":
+                        if supported_base_models is None:
+                            supported_base_models = _get_supported_base_models()
+                        if token not in supported_base_models:
+                            continue
+                        dedupe_key = token
+                    else:
+                        dedupe_key = token.casefold()
+                    if dedupe_key in seen:
+                        continue
+                    seen.add(dedupe_key)
+                    matched_values.append(token)
+                if not matched_values:
+                    logger.warning(
+                        "Dropping download root rule for %s: no valid %s matches",
+                        key,
+                        match_type,
+                    )
+                    continue
+                root = raw_rule.get("root")
+                if not isinstance(root, str) or not root.strip():
+                    continue
+                root = root.strip()
+                if normalize_root_identity(root) not in allowed_roots:
+                    logger.warning(
+                        "Dropping download root rule for %s: root %s is not a "
+                        "configured root for this model type",
+                        key,
+                        root,
+                    )
+                    continue
+                normalized[key].append(
+                    {
+                        "match_type": match_type,
+                        "match": matched_values,
+                        "root": root,
+                    }
+                )
+
+        return normalized
+
+    def get_download_root_rules(self) -> Dict[str, List[Dict[str, Any]]]:
+        rules = self.normalize_download_root_rules(
+            self.settings.get("download_root_rules")
+        )
+        if rules != self.settings.get("download_root_rules"):
+            self.settings["download_root_rules"] = rules
+            self._save_settings()
+        return rules
 
     def get_skip_previously_downloaded_model_versions(self) -> bool:
         value = self.settings.get("skip_previously_downloaded_model_versions", False)
@@ -1847,6 +2088,8 @@ class SettingsManager:
             value = self.normalize_metadata_refresh_skip_paths(value)
         elif key == "download_skip_base_models":
             value = self.normalize_download_skip_base_models(value)
+        elif key == "download_root_rules":
+            value = self.normalize_download_root_rules(value)
         elif key == "mature_blur_level":
             value = self.normalize_mature_blur_level(value)
         elif key == "default_other_roots":
@@ -1854,6 +2097,8 @@ class SettingsManager:
         elif key == "enabled_other_sub_types":
             value = normalize_other_sub_types(value)
         elif key == "enable_other_models":
+            value = bool(value)
+        elif key == "enable_workflows":
             value = bool(value)
         elif key == "recipes_path":
             current_recipes_dir = self._get_effective_recipes_dir()
@@ -1901,6 +2146,8 @@ class SettingsManager:
             self._refresh_sidecar_storage_config()
         if key in ("enable_other_models", "enabled_other_sub_types"):
             self._apply_other_model_settings_change()
+        if key == "enable_workflows":
+            self._apply_workflow_settings_change()
         if portable_switch_pending:
             self._finalize_portable_switch()
 
@@ -2381,34 +2628,6 @@ class SettingsManager:
 
         if was_active:
             self._notify_library_change(self.settings["active_library"])
-
-    def update_active_library_paths(
-        self,
-        folder_paths: Mapping[str, Iterable[str]],
-        *,
-        extra_folder_paths: Optional[Mapping[str, Iterable[str]]] = None,
-        default_lora_root: Optional[str] = None,
-        default_checkpoint_root: Optional[str] = None,
-        default_unet_root: Optional[str] = None,
-        default_embedding_root: Optional[str] = None,
-        default_other_roots: Optional[Mapping[str, str]] = None,
-        recipes_path: Optional[str] = None,
-    ) -> None:
-        """Update folder paths for the active library."""
-
-        active_name = self.get_active_library_name()
-        self.upsert_library(
-            active_name,
-            folder_paths=folder_paths,
-            extra_folder_paths=extra_folder_paths,
-            default_lora_root=default_lora_root,
-            default_checkpoint_root=default_checkpoint_root,
-            default_unet_root=default_unet_root,
-            default_embedding_root=default_embedding_root,
-            default_other_roots=default_other_roots,
-            recipes_path=recipes_path,
-            activate=True,
-        )
 
     def _notify_library_change(self, library_name: str) -> None:
         """Notify dependent services that the active library changed."""

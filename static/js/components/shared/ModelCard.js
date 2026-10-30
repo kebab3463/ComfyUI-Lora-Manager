@@ -10,6 +10,7 @@ import { MODEL_TYPES } from '../../api/apiConfig.js';
 import { getModelApiClient } from '../../api/modelApiFactory.js';
 import { showDeleteModal } from '../../utils/modalUtils.js';
 import { togglePromoteNvme, togglePinNvme, applyNvmeCardState, runNvmeCardAction } from '../../utils/nvmeCache.js';
+import { copyWorkflowToClipboard, sendWorkflowToComfy } from '../../utils/workflowActions.js';
 import { translate } from '../../utils/i18nHelpers.js';
 import { eventManager } from '../../utils/EventManager.js';
 
@@ -304,6 +305,9 @@ function handleSendToWorkflow(card, replaceMode, modelType) {
         const name = card.dataset.file_name || '';
         const embeddingCode = folder ? `embedding:${folder}/${name}` : `embedding:${name}`;
         sendEmbeddingToWorkflow(embeddingCode);
+    } else if (modelType === MODEL_TYPES.WORKFLOW) {
+        // Workflow send loads the whole graph document; no append/replace modes.
+        sendWorkflowToComfy(card.dataset.filepath);
     } else {
         showToast('modelCard.sendToWorkflow.checkpointNotImplemented', {}, 'info');
     }
@@ -323,6 +327,8 @@ function handleCopyAction(card, modelType) {
         const embeddingCode = folder ? `embedding:${folder}/${name}` : `embedding:${name}`;
         const message = translate('modelCard.actions.embeddingNameCopied', {}, 'Embedding syntax copied');
         copyToClipboard(embeddingCode, message);
+    } else if (modelType === MODEL_TYPES.WORKFLOW) {
+        copyWorkflowToClipboard(card.dataset.filepath);
     } else {
         // Other model types (VAE, upscalers, ...) - copy the file name
         const fileName = card.dataset.file_name;
@@ -712,6 +718,9 @@ export function createModelCard(model, modelType) {
         // Embedding send always appends to the prompt; no replace mode.
         sendTitle = translate('modelCard.actions.sendEmbeddingToWorkflow', {}, 'Send to ComfyUI');
         copyTitle = translate('modelCard.actions.copyEmbeddingName', {}, 'Copy embedding name');
+    } else if (modelType === MODEL_TYPES.WORKFLOW) {
+        sendTitle = translate('modelCard.actions.openInComfyUI', {}, 'Open in ComfyUI');
+        copyTitle = translate('modelCard.actions.copyWorkflowToClipboard', {}, 'Copy workflow to clipboard');
     } else {
         sendTitle = translate('modelCard.actions.sendToWorkflow', {}, 'Send to ComfyUI');
         copyTitle = translate('modelCard.actions.copyLoRASyntax', {}, 'Copy value');
@@ -719,6 +728,12 @@ export function createModelCard(model, modelType) {
 
     const updateBadgeLabel = translate('modelCard.badges.update', {}, 'Update');
     const updateBadgeTooltip = translate('modelCard.badges.updateAvailable', {}, 'Update available');
+    // Standalone has no running ComfyUI graph to push a workflow into.
+    const hideSendIcon = modelType === MODEL_TYPES.WORKFLOW && state.global.settings.standalone_mode;
+    const sendIcon = hideSendIcon ? '' : `
+        <i class="fas fa-paper-plane"
+           title="${sendTitle}">
+        </i>`;
     const actionIcons = `
         <i class="${isFavorite ? 'fas fa-star favorite-active' : 'far fa-star'}" 
            title="${favoriteTitle}">
@@ -726,10 +741,7 @@ export function createModelCard(model, modelType) {
         <i class="fas fa-globe" 
            title="${globeTitle}"
            ${!globeEnabled ? 'style="opacity: 0.5; cursor: not-allowed"' : ''}>
-        </i>
-        <i class="fas fa-paper-plane" 
-           title="${sendTitle}">
-        </i>
+        </i>${sendIcon}
         <i class="fas fa-copy" 
            title="${copyTitle}">
         </i>
@@ -811,12 +823,14 @@ export function createModelCard(model, modelType) {
                             const autoTags = model.auto_tags || [];
                             const hlTags = autoTags.filter(t => t === 'HIGH' || t === 'LOW');
                             const hasVersionName = model.civitai?.name;
+                            const quantization = typeof model.quantization === 'string' && model.quantization
+                                ? model.quantization : null;
                             // When group_by_model is active and model has multiple versions,
                             // show clickable version count instead of version name (and hide badges)
                             const isGroupByModel = state.global.settings.group_by_model;
                             const versionCount = model.version_count;
                             const showVersionCount = isGroupByModel && versionCount > 1;
-                            if (!hlTags.length && !hasVersionName && !showVersionCount) return '';
+                            if (!hlTags.length && !hasVersionName && !showVersionCount && !quantization) return '';
                             const density = state.global.settings.display_density || 'default';
                             const shortLabels = density === 'medium' || density === 'compact';
                             // Don't show HIGH/LOW badges when showing version count (confusing in grouped mode)
@@ -826,6 +840,9 @@ export function createModelCard(model, modelType) {
                                 const titleAttr = shortLabels ? ` title="${t}"` : '';
                                 return `<span class="${cls}"${titleAttr}>${label}</span>`;
                             }).join('') : '';
+                            // Suppress the quant badge in grouped mode too (a group mixes quants)
+                            const quantBadge = !showVersionCount && quantization
+                                ? `<span class="quant-badge">${quantization}</span>` : '';
                             let versionHtml = '';
                             if (showVersionCount) {
                                 const countLabel = translate('modelCard.footer.versionCount', { count: versionCount }, `${versionCount} versions`);
@@ -833,7 +850,7 @@ export function createModelCard(model, modelType) {
                             } else if (hasVersionName) {
                                 versionHtml = `<span class="version-name civitai-version">${model.civitai.name}</span>`;
                             }
-                            return `<span class="badge-version-unit">${badges}${versionHtml}</span>`;
+                            return `<span class="badge-version-unit">${badges}${versionHtml}${quantBadge}</span>`;
                         })()}
                         ${hasUsageCount ? `<span class="version-name" title="${translate('modelCard.usage.timesUsed', {}, 'Times used')}">${model.usage_count}×</span>` : ''}
                         ${likeCount !== null ? `<span class="civitai-stat civitai-stat--likes" title="${translate('modelCard.stats.likes', {}, 'Civitai likes')}"><i class="fas fa-thumbs-up"></i>${formatStatCount(likeCount)}</span>` : ''}

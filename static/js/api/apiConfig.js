@@ -10,7 +10,8 @@ export const MODEL_TYPES = {
     LORA: 'loras',
     CHECKPOINT: 'checkpoints',
     EMBEDDING: 'embeddings',
-    OTHER: 'other'
+    OTHER: 'other',
+    WORKFLOW: 'workflows'
 };
 
 // Base API configuration for each model type
@@ -54,6 +55,16 @@ export const MODEL_CONFIG = {
         supportsMove: true,
         supportsFolderManagement: true,
         templateName: 'other.html'
+    },
+    [MODEL_TYPES.WORKFLOW]: {
+        displayName: 'Workflow',
+        singularName: 'workflow',
+        defaultPageSize: 100,
+        supportsLetterFilter: false,
+        supportsBulkOperations: true,
+        supportsMove: true,
+        supportsFolderManagement: true,
+        templateName: 'workflows.html'
     }
 };
 
@@ -87,6 +98,10 @@ export function getApiEndpoints(modelType) {
         separateCard: `/api/lm/${modelType}/separate-card`,
         createFolder: `/api/lm/${modelType}/create-folder`,
         deleteFolder: `/api/lm/${modelType}/delete-folder`,
+        // Drops the sidebar records of a folder that no longer exists on disk:
+        // the only cleanup left for a node whose directory was moved or deleted
+        // outside LoRA Manager.
+        forgetFolder: `/api/lm/${modelType}/forget-folder`,
         renameFolder: `/api/lm/${modelType}/rename-folder`,
         // Resolves a tree-relative folder onto the root(s) that hold it: the
         // unified folder tree merges every root, so a node does not carry its
@@ -98,6 +113,7 @@ export function getApiEndpoints(modelType) {
         fetchAllCivitai: `/api/lm/${modelType}/fetch-all-civitai`,
         refreshCivitaiStats: `/api/lm/${modelType}/refresh-civitai-stats`,
         relinkCivitai: `/api/lm/${modelType}/relink-civitai`,
+        civitaiModelByVersion: `/api/lm/${modelType}/civitai/model/version`,
         civitaiVersions: `/api/lm/${modelType}/civitai/versions`,
         refreshUpdates: `/api/lm/${modelType}/updates/refresh`,
         fetchMissingLicenses: `/api/lm/${modelType}/updates/fetch-missing-license`,
@@ -152,7 +168,6 @@ export const MODEL_SPECIFIC_ENDPOINTS = {
         civitaiUrl: `/api/lm/${MODEL_TYPES.LORA}/civitai-url`,
         metadata: `/api/lm/${MODEL_TYPES.LORA}/metadata`,
         getTriggerWordsPost: `/api/lm/${MODEL_TYPES.LORA}/get_trigger_words`,
-        civitaiModelByVersion: `/api/lm/${MODEL_TYPES.LORA}/civitai/model/version`,
         civitaiModelByHash: `/api/lm/${MODEL_TYPES.LORA}/civitai/model/hash`,
     },
     [MODEL_TYPES.CHECKPOINT]: {
@@ -167,6 +182,14 @@ export const MODEL_SPECIFIC_ENDPOINTS = {
     [MODEL_TYPES.OTHER]: {
         metadata: `/api/lm/${MODEL_TYPES.OTHER}/metadata`,
         roots_by_subtype: `/api/lm/${MODEL_TYPES.OTHER}/roots_by_subtype`,
+    },
+    [MODEL_TYPES.WORKFLOW]: {
+        metadata: `/api/lm/${MODEL_TYPES.WORKFLOW}/metadata`,
+        sendToComfy: `/api/lm/${MODEL_TYPES.WORKFLOW}/send-to-comfy`,
+        content: `/api/lm/${MODEL_TYPES.WORKFLOW}/content`,
+        comfyuiState: `/api/lm/${MODEL_TYPES.WORKFLOW}/comfyui-state`,
+        updateFromComfy: `/api/lm/${MODEL_TYPES.WORKFLOW}/update-from-comfy`,
+        restore: `/api/lm/${MODEL_TYPES.WORKFLOW}/restore`,
     }
 };
 

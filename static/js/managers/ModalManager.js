@@ -255,6 +255,18 @@ export class ModalManager {
             });
         }
 
+        // Add confirmationModal registration (generic JS-driven confirmation)
+        const confirmationModal = document.getElementById('confirmationModal');
+        if (confirmationModal) {
+            this.registerModal('confirmationModal', {
+                element: confirmationModal,
+                onClose: () => {
+                    this.getModal('confirmationModal').element.classList.remove('show');
+                    document.body.classList.remove('modal-open');
+                }
+            });
+        }
+
         // Add deleteFolderModal registration
         const deleteFolderModal = document.getElementById('deleteFolderModal');
         if (deleteFolderModal) {
@@ -466,6 +478,7 @@ export class ModalManager {
           id === "bulkDeleteModal" ||
           id === "checkUpdatesConfirmModal" ||
           id === "refreshStatsConfirmModal" ||
+          id === "confirmationModal" ||
           id === "deleteFolderModal" ||
           id === "resolveFilenameConflictsModal"
         ) {
