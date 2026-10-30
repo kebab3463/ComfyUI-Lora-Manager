@@ -29,6 +29,8 @@ const DEFAULT_SETTINGS_BASE = Object.freeze({
     default_embedding_root: '',
     default_other_roots: {},
     enable_other_models: false,
+    enable_workflows: false,
+    workflow_folder_paths: [],
     enabled_other_sub_types: ['vae', 'upscaler', 'text_encoder'],
     recipes_path: '',
     base_model_path_mappings: {},
@@ -52,6 +54,7 @@ const DEFAULT_SETTINGS_BASE = Object.freeze({
     lora_syntax_format: 'legacy',
     model_card_footer_action: 'example_images',
     show_version_on_card: true,
+    show_quantization_on_card: true,
     include_trigger_words: false,
     compact_mode: false,
     priority_tags: { ...DEFAULT_PRIORITY_TAG_CONFIG },
@@ -62,8 +65,10 @@ const DEFAULT_SETTINGS_BASE = Object.freeze({
     price_check_ttl_hours: 24,
     auto_organize_exclusions: [],
     metadata_refresh_skip_paths: [],
+    send_to_workflow_exclusions: { node_classes: [], title_patterns: [] },
     skip_previously_downloaded_model_versions: false,
     download_skip_base_models: [],
+    download_root_rules: { loras: [], checkpoints: [], unet: [], embeddings: [] },
     unknown_base_model_routing: 'diffusion_model',
     backup_auto_enabled: true,
     backup_retention_count: 5,
@@ -87,7 +92,9 @@ export function createDefaultSettings() {
         download_filename_templates: { ...DEFAULT_FILENAME_TEMPLATES },
         priority_tags: { ...DEFAULT_PRIORITY_TAG_CONFIG },
         default_other_roots: {},
+        download_root_rules: { loras: [], checkpoints: [], unet: [], embeddings: [] },
         enabled_other_sub_types: ['vae', 'upscaler', 'text_encoder'],
+        send_to_workflow_exclusions: { node_classes: [], title_patterns: [] },
         // Standalone-only fields populated by GET /api/lm/settings; in plugin
         // mode the backend omits folder_paths/folder_path_schema and these
         // defaults apply.
@@ -102,6 +109,7 @@ const loraPreviewVersions = getMapFromStorage('loras_preview_versions');
 const checkpointPreviewVersions = getMapFromStorage('checkpoints_preview_versions');
 const embeddingPreviewVersions = getMapFromStorage('embeddings_preview_versions');
 const otherPreviewVersions = getMapFromStorage('other_preview_versions');
+const workflowPreviewVersions = getMapFromStorage('workflows_preview_versions');
 
 export const state = {
     // Global state
@@ -270,6 +278,43 @@ export const state = {
                 tags: false,
                 creator: false,
                 recursive: getStorageItem(`${MODEL_TYPES.OTHER}_recursiveSearch`, true),
+            },
+            filters: {
+                baseModel: [],
+                tags: {},
+                license: {},
+                modelTypes: [],
+                search: '',
+                tagLogic: 'any',
+            },
+            bulkMode: false,
+            selectedModels: new Set(),
+            metadataCache: new Map(),
+            showFavoritesOnly: false,
+            showUpdateAvailableOnly: false,
+            duplicatesMode: false,
+            viewMode: 'active',
+            excludedViewState: {
+                sortBy: 'name:asc',
+                search: '',
+            },
+            activeViewSnapshot: null,
+        },
+
+        [MODEL_TYPES.WORKFLOW]: {
+            currentPage: 1,
+            isLoading: false,
+            hasMore: true,
+            sortBy: 'name',
+            activeFolder: getStorageItem(`${MODEL_TYPES.WORKFLOW}_activeFolder`),
+            previewVersions: workflowPreviewVersions,
+            searchManager: null,
+            searchOptions: {
+                filename: true,
+                modelname: true,
+                tags: false,
+                creator: false,
+                recursive: getStorageItem(`${MODEL_TYPES.WORKFLOW}_recursiveSearch`, true),
             },
             filters: {
                 baseModel: [],

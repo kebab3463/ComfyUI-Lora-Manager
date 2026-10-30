@@ -152,6 +152,9 @@ def folder_path_schema() -> List[Dict[str, Any]]:
         {"key": key, "category": "core", "sub_type": None}
         for key in CORE_FOLDER_PATH_KEYS
     ]
+    # Workflow roots are LoRA-Manager-only (no ComfyUI folder category); the
+    # standalone Model Paths UI gates this editor on ``enable_workflows``.
+    schema.append({"key": "workflows", "category": "workflow", "sub_type": None})
     schema.extend(
         {"key": folder_key, "category": "other", "sub_type": sub_type}
         for folder_key, sub_type in OTHER_MODEL_FOLDER_SUBTYPES.items()
@@ -187,6 +190,9 @@ VALID_OTHER_CIVITAI_TYPES = {
     "controlnet",
     "other",
 }
+# CivitAI model.type values that map onto the workflow library (lowercased).
+# ComfyWorkflows is retired on CivitAI but grandfathered models still carry it.
+WORKFLOW_CIVITAI_TYPES = frozenset({"workflows", "comfyworkflows"})
 # CivitAI model.type -> internal sub_type for the "other" model page.
 CIVITAI_TYPE_TO_OTHER_SUB_TYPE = {
     "vae": "vae",
@@ -325,6 +331,32 @@ DEFAULT_DOWNLOAD_PATH_TEMPLATES: Dict[str, str] = {
 MAX_FOLDER_NAME_LENGTH = 100
 MAX_PATH_TAG_LENGTH = 50
 MAX_FILENAME_STEM_LENGTH = 150
+
+# Full-path budget for every file LoRA Manager creates or moves. Windows
+# enforces MAX_PATH (260 characters) on the whole path, and the per-component
+# caps above do not add up to a guarantee: a deep model root plus template
+# folders plus a 150-char stem can still overflow (see issue #1142). Enforced
+# on every platform so libraries stay portable across OSes.
+MAX_FULL_PATH_LENGTH = 260
+
+# Characters reserved past the filename stem when budgeting a path. The stem
+# is shared by the model file, the ".metadata.json" sidecar (and its ".bak"),
+# preview files (".preview.webp" and friends) and aria2 control files; the
+# longest of those suffixes is ".metadata.json.bak" at 18 chars.
+PATH_BUDGET_SUFFIX_ALLOWANCE = 20
+
+# Below this stem length a name is no longer meaningful; callers should skip
+# the operation with an actionable message instead of writing a stub name.
+MIN_VIABLE_STEM_LENGTH = 8
+
+# Fallback for the per-component filename limit in BYTES (POSIX NAME_MAX).
+# Filesystems count name components in bytes, not characters, so a CJK-heavy
+# name can pass every character-count cap above and still be unwritable.
+# fit_stem_to_path_budget probes the real limit per directory via
+# os.pathconf(PC_NAME_MAX) — encrypted filesystems report less (eCryptfs,
+# used by Ubuntu encrypted home dirs and Synology encrypted shares, allows
+# only 143 bytes) — and uses this value when probing is unavailable.
+MAX_FILENAME_COMPONENT_BYTES = 255
 
 # baseModel values from CivitAI that should be treated as diffusion models (unet)
 # These model types are incorrectly labeled as "checkpoint" by CivitAI but are actually diffusion models
@@ -516,3 +548,8 @@ SUPPORTED_DOWNLOAD_SKIP_BASE_MODELS = frozenset(
         "Wan Video 2.7",
     ]
 )
+
+# Model-type keys that download_root_rules understands. These mirror the
+# folder_paths keys ("loras"/"checkpoints"/"unet"/"embeddings") so a rule's
+# root can be validated against the roots configured for that type.
+DOWNLOAD_ROOT_RULE_FOLDER_KEYS = ("loras", "checkpoints", "unet", "embeddings")

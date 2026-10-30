@@ -17,6 +17,7 @@ from ..config import config
 from ..utils.constants import VALID_CHECKPOINT_SUB_TYPES, VALID_LORA_TYPES
 from ..utils.exif_utils import ExifUtils
 from ..utils.file_utils import calculate_autov3
+from ..utils.gc_utils import schedule_refreeze_after_rebuild
 from ..utils.recipe_open_stats import RecipeOpenStats
 from .model_scanner import WEIGHT_FILE_EXTENSIONS
 from .recipe_cache import RecipeCache
@@ -803,7 +804,16 @@ class RecipeScanner:
             loop = None
 
         if loop and not loop.is_closed():
-            loop.create_task(self.initialize_in_background())
+            loop.create_task(self._reinitialize_after_library_change())
+
+    async def _reinitialize_after_library_change(self) -> None:
+        """Rebuild the cache for the new library, then re-freeze the GC.
+
+        The rebuilt cache is freshly allocated and GC-tracked again
+        (issue #1147).
+        """
+        await self.initialize_in_background()
+        schedule_refreeze_after_rebuild("recipe library change")
 
     async def _get_civitai_client(self):
         """Lazily initialize CivitaiClient from registry"""
@@ -2754,6 +2764,11 @@ class RecipeScanner:
                         if not self._prune_skipped:
                             self._schedule_fts_index_build()
 
+                        # The rebuilt cache is freshly allocated and GC-tracked
+                        # again; re-freeze once the follow-up work settles
+                        # (issue #1147).
+                        schedule_refreeze_after_rebuild("recipe cache refresh")
+
                         return cast(RecipeCache, self._cache)
 
                     except Exception as e:
@@ -3160,6 +3175,51 @@ class RecipeScanner:
         except Exception as e:
             logger.error(f"Error getting hash from Civitai: {e}")
             return None, False
+
+    async def get_local_lora_by_version_id(
+        self, model_version_id: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a local LoRA by its CivitAI model version id.
+
+        Recipe parsers call this before asking a metadata provider so a model
+        that is already in the library is filled from the local cache (name,
+        base model, hash, preview) without a network request. The lookup uses
+        ``ModelCache.version_index``; a missing cache or an unknown id returns
+        ``None`` so callers can fall back to the remote provider.
+        """
+
+        if not self._lora_scanner or model_version_id is None:
+            return None
+
+        try:
+            await self._lora_scanner.get_cached_data()
+            return self._get_lora_from_version_index(model_version_id)
+        except Exception:
+            logger.debug(
+                "Local LoRA lookup by version id %s failed",
+                model_version_id,
+                exc_info=True,
+            )
+            return None
+
+    async def get_local_checkpoint_by_version_id(
+        self, model_version_id: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a local checkpoint by its CivitAI model version id."""
+
+        if not self._checkpoint_scanner or model_version_id is None:
+            return None
+
+        try:
+            await self._checkpoint_scanner.get_cached_data()
+            return self._get_checkpoint_from_version_index(model_version_id)
+        except Exception:
+            logger.debug(
+                "Local checkpoint lookup by version id %s failed",
+                model_version_id,
+                exc_info=True,
+            )
+            return None
 
     def _get_lora_from_version_index(
         self, model_version_id: Any
@@ -3737,6 +3797,12 @@ class RecipeScanner:
                             for item in filtered_data
                             if self._compute_availability_statuses(item) & selected
                         ]
+
+                # Filter by embedded workflow presence
+                if filters.get("has_workflow"):
+                    filtered_data = [
+                        item for item in filtered_data if item.get("has_workflow")
+                    ]
 
         # Apply sorting if not already handled by pre-sorted cache
         if ":" in sort_by or sort_field in ("loras_count", "random", "opened"):

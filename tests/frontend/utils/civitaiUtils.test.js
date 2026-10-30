@@ -337,14 +337,20 @@ describe('civitaiUtils', () => {
     });
 
     describe('isSupportedCivitaiPageHost', () => {
-        it('accepts civitai.com and civitai.red page hosts', () => {
+        it('accepts civitai.com, civitai.red and civitai.green page hosts', () => {
             expect(isSupportedCivitaiPageHost('civitai.com')).toBe(true);
             expect(isSupportedCivitaiPageHost('civitai.red')).toBe(true);
+            expect(isSupportedCivitaiPageHost('civitai.green')).toBe(true);
+        });
+
+        it('accepts www-prefixed page hosts', () => {
+            expect(isSupportedCivitaiPageHost('www.civitai.com')).toBe(true);
+            expect(isSupportedCivitaiPageHost('www.civitai.red')).toBe(true);
+            expect(isSupportedCivitaiPageHost('www.civitai.green')).toBe(true);
         });
 
         it('rejects unrelated hosts', () => {
-            expect(isSupportedCivitaiPageHost('www.civitai.com')).toBe(false);
-            expect(isSupportedCivitaiPageHost('www.civitai.red')).toBe(false);
+            expect(isSupportedCivitaiPageHost('civitai.com.evil.test')).toBe(false);
             expect(isSupportedCivitaiPageHost('example.com')).toBe(false);
             expect(isSupportedCivitaiPageHost('')).toBe(false);
             expect(isSupportedCivitaiPageHost(null)).toBe(false);
@@ -352,6 +358,12 @@ describe('civitaiUtils', () => {
     });
 
     describe('extractCivitaiModelUrlParts', () => {
+        it.each(['civitai.com', 'civitai.red'])('rejects download and API URLs on %s', (host) => {
+            for (const path of ['/api/download/models/3390681', '/api/v1/models/3390681', '/models/3390681invalid']) {
+                expect(extractCivitaiModelUrlParts(`https://${host}${path}?modelVersionId=3390681`))
+                    .toEqual({ modelId: null, modelVersionId: null });
+            }
+        });
         it('extracts model and version ids from civitai.red model URLs', () => {
             expect(
                 extractCivitaiModelUrlParts('https://civitai.red/models/65423/name?modelVersionId=98765')
@@ -373,9 +385,21 @@ describe('civitaiUtils', () => {
         it('rejects image-like URLs from unsupported hosts', () => {
             expect(extractCivitaiImageId('https://example.com/images/126920345')).toBe(null);
         });
+
+        it.each(['civitai.com', 'civitai.red'])('rejects non-image pages on %s', (host) => {
+            for (const path of ['/api/v1/images/126920345', '/images/126920345invalid']) {
+                expect(extractCivitaiImageId(`https://${host}${path}`)).toBe(null);
+            }
+        });
     });
 
     describe('classifyModelRelinkUrl', () => {
+        it.each(['civitai.com', 'civitai.red', 'civarchive.com'])('rejects non-model pages on %s', (host) => {
+            for (const path of ['/api/download/models/3390681', '/api/v1/models/3390681', '/models/3390681invalid']) {
+                expect(classifyModelRelinkUrl(`https://${host}${path}`))
+                    .toEqual({ source: null, modelId: null, modelVersionId: null });
+            }
+        });
         it('classifies civitai.com model URLs', () => {
             expect(
                 classifyModelRelinkUrl('https://civitai.com/models/649516/name?modelVersionId=726676')

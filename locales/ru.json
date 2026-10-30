@@ -160,7 +160,9 @@
             "promoteToNvme": "Переместить на NVMe (скопировать в быстрый кэш)",
             "pinToNvme": "Закрепить на NVMe (хранить в быстром кэше, никогда не вытеснять)",
             "demoteFromNvme": "Убрать с NVMe (удалить из быстрого кэша)",
-            "unpinFromNvme": "Открепить от NVMe (снова может быть вытеснен)"
+            "unpinFromNvme": "Открепить от NVMe (снова может быть вытеснен)",
+            "openInComfyUI": "Открыть в ComfyUI",
+            "copyWorkflowToClipboard": "Копировать workflow в буфер обмена"
         },
         "nsfw": {
             "matureContent": "Контент для взрослых",
@@ -265,6 +267,7 @@
             "checkpoints": "Checkpoints",
             "embeddings": "Embeddings",
             "other": "Другое",
+            "workflows": "Workflows",
             "statistics": "Статистика"
         },
         "search": {
@@ -285,6 +288,7 @@
         },
         "filter": {
             "title": "Фильтр моделей",
+            "countTitle": "{name} — {count} модел(ей)",
             "presets": "Пресеты",
             "savePreset": "Сохранить текущие активные фильтры как новый пресет.",
             "savePresetDisabledActive": "Невозможно сохранить: Пресет уже активен. Измените фильтры, чтобы сохранить новый пресет",
@@ -322,7 +326,9 @@
             "loraAvailability": "Доступность LoRAs",
             "availabilityReady": "Готовы к использованию",
             "availabilityMissing": "Есть отсутствующие",
-            "availabilityDeleted": "Есть удалённые"
+            "availabilityDeleted": "Есть удалённые",
+            "workflow": "Workflow",
+            "hasWorkflow": "С Workflow"
         },
         "theme": {
             "toggle": "Переключить тему",
@@ -422,7 +428,8 @@
             "autoOrganize": "Автоорганизация",
             "metadata": "Метаданные",
             "sidecarStorage": "Хранилище sidecar-файлов",
-            "proxySettings": "Настройки прокси"
+            "proxySettings": "Настройки прокси",
+            "sendToWorkflow": "Отправка в Workflow"
         },
         "nav": {
             "general": "Общее",
@@ -476,6 +483,18 @@
                 "saveFailed": "Не удалось сохранить пути для пропуска: {message}"
             }
         },
+        "sendToWorkflowExclusions": {
+            "nodeClasses": {
+                "label": "Исключённые типы узлов",
+                "placeholder": "Пример: CheckpointLoaderSimple, MyCustomNode",
+                "help": "Имена классов узлов ComfyUI, которые никогда не отображаются как цели отправки в Workflow. Разделяйте несколько записей запятыми или точками с запятой. Узлы, явно отмеченные в ComfyUI (правый клик → Mark as), не затрагиваются."
+            },
+            "titlePatterns": {
+                "label": "Исключённые шаблоны заголовков узлов",
+                "placeholder": "Пример: negative, preview",
+                "help": "Узлы, в заголовке которых есть любой из этих фрагментов текста (без учёта регистра), скрываются из целей отправки в Workflow. Разделяйте несколько записей запятыми или точками с запятой. Узлы, явно отмеченные в ComfyUI (правый клик → Mark as), не затрагиваются."
+            }
+        },
         "backup": {
             "autoEnabled": "Автоматические резервные копии",
             "autoEnabledHelp": "Создаёт локальный снимок раз в день и хранит последние снимки согласно политике хранения.",
@@ -518,6 +537,42 @@
             },
             "validation": {
                 "saveFailed": "Не удалось сохранить исключённые базовые модели: {message}"
+            }
+        },
+        "downloadRootRules": {
+            "title": "Правила корневых папок загрузки",
+            "help": "Направляет загрузки в другую корневую папку в зависимости от базовой модели или тегов модели.",
+            "description": "Правила проверяются по порядку. Срабатывает первое совпадение; загрузки без совпадения используют корневую папку по умолчанию.",
+            "defaultHint": "По умолчанию: {root} — загрузки без совпадения попадают сюда",
+            "defaultSuffix": "по умолчанию",
+            "addBaseModelRule": "Правило базовой модели",
+            "addTagRule": "Правило тега",
+            "removeRule": "Удалить правило",
+            "moveUp": "Вверх",
+            "moveDown": "Вниз",
+            "noRoots": "Для этого типа моделей не настроены корневые папки.",
+            "matchTypes": {
+                "baseModel": "Базовая модель",
+                "tag": "Тег"
+            },
+            "matchTypeChips": {
+                "baseModel": "BM",
+                "tag": "Тег"
+            },
+            "tagPlaceholder": "character, style, realistic",
+            "summary": {
+                "selectBaseModels": "Выберите базовые модели...",
+                "enterTags": "Введите теги...",
+                "more": "ещё {count}"
+            },
+            "types": {
+                "loras": "LoRA",
+                "checkpoints": "Checkpoint",
+                "unet": "Diffusion Model",
+                "embeddings": "Embedding"
+            },
+            "validation": {
+                "saveFailed": "Не удалось сохранить правила корневых папок загрузки: {message}"
             }
         },
         "skipPreviouslyDownloadedModelVersions": {
@@ -564,6 +619,8 @@
             },
             "showVersionOnCard": "Показывать версию на карточке",
             "showVersionOnCardHelp": "Показать или скрыть название версии на карточках моделей",
+            "showQuantizationOnCard": "Показывать квантование на карточке",
+            "showQuantizationOnCardHelp": "Показать уровень квантования (например, Q4_K_M, FP8) рядом с названием версии на карточках моделей",
             "modelCardFooterAction": "Действие кнопки карточки модели",
             "modelCardFooterActionOptions": {
                 "exampleImages": "Открыть примеры изображений",
@@ -580,8 +637,8 @@
             "cardBlurAmountHelp": "Настройте интенсивность размытия наложений верхнего и нижнего колонтитулов на карточках моделей и рецептов (0 = без размытия, 20 = максимальное размытие)."
         },
         "folderSettings": {
-            "activeLibrary": "Активная библиотека",
-            "activeLibraryHelp": "Переключайтесь между настроенными библиотеками, чтобы обновить папки по умолчанию. Изменение выбора перезагружает страницу.",
+            "activeLibrary": "Активная библиотека (устарело)",
+            "activeLibraryHelp": "Переключайтесь между настроенными библиотеками, чтобы обновить папки по умолчанию. Изменение выбора перезагружает страницу. Устарело: поддержка нескольких библиотек будет удалена в одном из следующих выпусков. Несколько корневых папок в пределах одной библиотеки по-прежнему полностью поддерживаются.",
             "loadingLibraries": "Загрузка библиотек...",
             "noLibraries": "Библиотеки не настроены",
             "defaultLoraRoot": "Корневая папка LoRA",
@@ -604,6 +661,10 @@
             "defaultControlnetRootHelp": "Установить корневую папку ControlNet по умолчанию для загрузок, импорта и перемещений",
             "enableOtherModels": "Управление другими моделями",
             "enableOtherModelsHelp": "Если выключено, папки VAE / Upscaler / Text Encoder / CLIP Vision / ControlNet не сканируются, страница «Другие модели» остаётся отключённой, а эти типы моделей нельзя загрузить.",
+            "enableWorkflows": "Управление workflow",
+            "enableWorkflowsHelp": "Если выключено, папки workflow (folder_paths.workflows) не сканируются, страница Workflows остаётся отключённой, а ресурсы Workflow с CivitAI нельзя связать или скачать.",
+            "workflowFolders": "Папки workflow",
+            "workflowFoldersHelp": "Папки, в которых сканируются JSON-файлы workflow ComfyUI. Управляются только LoRA Manager (не используются совместно с ComfyUI); изменения применяются сразу.",
             "otherSubTypes": "Управляемые типы моделей",
             "otherSubTypesHelp": "Выберите, какие категории других моделей сканируются и отображаются на странице «Другие модели».",
             "subTypeVae": "VAE",
@@ -657,7 +718,8 @@
                 "text_encoders": "Пути Text Encoder",
                 "clip": "Пути CLIP (устаревшие)",
                 "clip_vision": "Пути CLIP Vision",
-                "controlnet": "Пути ControlNet"
+                "controlnet": "Пути ControlNet",
+                "workflows": "Пути workflow"
             }
         },
         "directoryPicker": {
@@ -862,6 +924,8 @@
             "migrationDeferred": "Существующие sidecar-файлы не были перенесены. Вы можете перенести их позже в разделе «Настройки → Библиотека → Хранилище sidecar-файлов».",
             "confirmToCentralized": "Режим хранения изменён, но существующие sidecar-файлы .metadata.json и изображения превью не переносятся автоматически. Перенести их сейчас в централизованное хранилище? Это также можно сделать позже кнопкой «Перенести sidecar-файлы сейчас».",
             "confirmToAlongside": "Режим хранения изменён, но существующие sidecar-файлы .metadata.json и изображения превью не переносятся автоматически. Вернуть их сейчас рядом с их файлами моделей? Это также можно сделать позже кнопкой «Перенести sidecar-файлы сейчас».",
+            "confirmToCentralizedManual": "Перенести существующие sidecar-файлы .metadata.json и изображения превью в централизованное хранилище сейчас?",
+            "confirmToAlongsideManual": "Вернуть существующие sidecar-файлы .metadata.json и изображения превью рядом с их файлами моделей сейчас?",
             "confirmRelocateRoot": "Каталог централизованного хранилища изменён, но существующие sidecar-файлы и изображения превью всё ещё находятся в прежнем каталоге. Перенести их сейчас в новый каталог?",
             "effectivePathLabel": "Фактическое расположение хранилища:",
             "openFolderButton": "Открыть папку",
@@ -945,6 +1009,11 @@
                 "downloadsAsc": "[TODO: Translate] Least downloaded",
                 "random": "Случайно",
                 "randomAction": "Перемешать"
+            },
+            "modelType": {
+                "title": "Фильтровать по типу модели",
+                "all": "Все типы",
+                "multiple": "{count} тип(ов)"
             },
             "refresh": {
                 "title": "Обновить список моделей",
@@ -1083,6 +1152,9 @@
     },
     "recipes": {
         "title": "Рецепты LoRA",
+        "filter": {
+            "countTitle": "{name} — {count} рецепт(ов)"
+        },
         "actions": {
             "sendCheckpoint": "Отправить в ComfyUI",
             "sendRecipe": "Отправить в ComfyUI",
@@ -1115,7 +1187,8 @@
             "sendWorkflow": "Отправить workflow в ComfyUI",
             "sent": "Workflow отправлен в ComfyUI",
             "sendFailed": "Не удалось отправить workflow в ComfyUI",
-            "noWorkflow": "В этом рецепте не найден встроенный workflow"
+            "noWorkflow": "В этом рецепте не найден встроенный workflow",
+            "hasWorkflow": "Содержит Workflow ComfyUI"
         },
         "status": {
             "ready": "Готово к использованию",
@@ -1428,6 +1501,53 @@
             "openSettingsFolder": "Открыть папку настроек"
         }
     },
+    "workflows": {
+        "title": "Workflows",
+        "contextMenu": {
+            "sendToComfy": "Открыть в ComfyUI",
+            "updateFromComfy": "Обновить из ComfyUI",
+            "copyWorkflow": "Копировать workflow",
+            "restoreDownloaded": "Восстановить загруженную версию"
+        },
+        "sendToComfy": {
+            "success": "Workflow отправлен в ComfyUI",
+            "failed": "Не удалось отправить workflow: {message}"
+        },
+        "restoreDownloaded": {
+            "title": "Восстановить загруженную версию?",
+            "message": "Локальные изменения будут отброшены, а workflow вернётся к загруженной версии.",
+            "confirmButton": "Восстановить",
+            "restoring": "Восстановление workflow...",
+            "success": "Workflow восстановлен до загруженной версии",
+            "failed": "Не удалось восстановить workflow: {message}"
+        },
+        "updateFromComfy": {
+            "success": "Workflow обновлён из ComfyUI",
+            "noChanges": "В ComfyUI нет изменений для записи обратно",
+            "cancelled": "Обновление отменено",
+            "failed": "Не удалось обновить из ComfyUI: {message}"
+        },
+        "copyWorkflow": {
+            "failed": "Не удалось скопировать workflow: {message}"
+        },
+        "disabled": {
+            "title": "Управление workflow отключено",
+            "description": "Включите, чтобы сканировать и управлять файлами workflow ComfyUI, сохранять их метаданные и превью CivitAI и отправлять их в работающий граф ComfyUI.",
+            "enableButton": "Включить Workflows",
+            "hint": "Вы сможете снова отключить эту функцию позже в разделе «Настройки > Библиотека».",
+            "enableFailed": "Не удалось включить Workflows"
+        },
+        "noPaths": {
+            "title": "Папки workflow не найдены",
+            "descriptionStandalone": "Управление workflow включено, но папки workflow не найдены. Добавьте свои папки workflow в разделе «Настройки → Пути к моделям», затем перезапустите LoRA Manager.",
+            "hintStandalone": "Workflow читаются из записей folder_paths.workflows.",
+            "descriptionComfyUI": "Управление workflow включено, но папки workflow не настроены. Добавьте папки workflow в разделе «Настройки → Библиотека» и перезагрузите эту страницу.",
+            "hintComfyUI": "Workflow хранятся в собственных папках библиотеки (folder_paths.workflows); встроенный список workflow в ComfyUI не затрагивается.",
+            "openSettings": "Открыть настройки",
+            "openModelPaths": "Настроить папки моделей",
+            "openSettingsFolder": "Открыть папку настроек"
+        }
+    },
     "sidebar": {
         "modelRoot": "Корень",
         "collapseAll": "Свернуть все папки",
@@ -1459,7 +1579,8 @@
             "notEmptyMessageCount": "В этой папке ещё есть {count} файл(ов) модели. Сначала удалите или переместите их — удаление папки никогда не затрагивает файлы моделей.",
             "notEmptyMessageExcluded": "В этой папке ещё есть {count} файл(ов) модели, из них {excluded} исключены из библиотеки. Снимите исключение в разделе «Управление исключёнными моделями» и удалите их — удаление папки никогда не затрагивает файлы моделей.",
             "missingTitle": "Папка не найдена",
-            "missingMessage": "Эта папка больше не существует на диске. Обновите боковую панель и повторите попытку.",
+            "missingMessage": "Эта папка больше не существует на диске. Вы можете удалить её из списка.",
+            "removeFromList": "Удалить из списка",
             "symlinkTitle": "Папка является символической ссылкой",
             "symlinkMessage": "Все копии этой папки являются символическими ссылками; удалите ссылку или её цель вне LoRA Manager.",
             "protectedTitle": "Папка защищена",
@@ -1481,6 +1602,8 @@
             "busy": "В этой папке всё ещё есть отложенное удаление. Дождитесь окончания окна отмены.",
             "unsupported": "Удаление папок не поддерживается на этой странице",
             "missing": "Эта папка больше не существует на диске. Обновите боковую панель и повторите попытку.",
+            "forgotten": "Папка \"{name}\" удалена из списка",
+            "exists": "Папка снова появилась на диске. Вместо этого удалите её.",
             "symlink": "Эта папка является символической ссылкой; её нельзя удалить из боковой панели.",
             "successMulti": "Папка \"{name}\" удалена из {count} корневых папок моделей",
             "partial": "Удалено {count} из {total} копий — не удалось удалить {failed}. Обновите боковую панель и повторите попытку."
@@ -1671,6 +1794,10 @@
                 "label": "Тип назначения:",
                 "tooltip": "Определяется автоматически из метаданных модели. Переключите, если определение неверно; переключение отключает «Использовать путь по умолчанию» для этой загрузки."
             },
+            "routedByRule": {
+                "baseModel": "Маршрут по правилу: базовая модель «{value}»",
+                "tag": "Маршрут по правилу: тег «{value}»"
+            },
             "targetFolderPath": "Путь к целевой папке:",
             "browseFolders": "Обзор папок:",
             "createNewFolder": "Создать новую папку",
@@ -1696,6 +1823,8 @@
             "errors": {
                 "invalidUrl": "Неверный формат URL модели",
                 "noVersions": "Нет доступных версий для этой модели",
+                "linkedFileNotFound": "Файл {fileId} не найден в запрошенной версии модели.",
+                "linkedFileNotWeightFile": "Файл {fileId} не является загружаемым файлом модели.",
                 "mixedSources": "Нельзя смешивать URL-адреса CivitAI и Hugging Face / ModelScope в одном пакете.",
                 "noModelFiles": "В этом репозитории не найдено файлов моделей."
             },
@@ -1798,7 +1927,8 @@
             "titleToAlongside": "Вернуть sidecar-файлы рядом с файлами моделей?",
             "confirmButton": "Перенести сейчас",
             "titleRelocateRoot": "Перенести sidecar-файлы в новый каталог хранилища?",
-            "destination": "Назначение: {path}"
+            "destination": "Назначение: {path}",
+            "defaultLocationHint": "Будет использовано расположение по умолчанию. Чтобы использовать свою папку, отмените, укажите путь хранилища выше, затем нажмите «Перенести sidecar-файлы сейчас»."
         },
         "sidecarMigrationResult": {
             "title": "Сводка переноса sidecar-файлов",
@@ -1944,6 +2074,7 @@
                 "viewOnHuggingFaceText": "Открыть Hugging Face",
                 "viewCreatorProfile": "Посмотреть профиль создателя",
                 "openFileLocation": "Открыть расположение файла",
+                "openSidecarLocation": "Открыть расположение метаданных",
                 "sendToWorkflow": "Отправить в ComfyUI",
                 "sendToWorkflowText": "Отправить в ComfyUI",
                 "copyHash": "Копировать хеш",
@@ -1954,6 +2085,12 @@
             "openFileLocation": {
                 "success": "Расположение файла успешно открыто",
                 "failed": "Не удалось открыть расположение файла",
+                "copied": "Путь скопирован в буфер обмена: {{path}}",
+                "clipboardFallback": "Путь: {{path}}"
+            },
+            "openSidecarLocation": {
+                "success": "Расположение метаданных успешно открыто",
+                "failed": "Не удалось открыть расположение метаданных",
                 "copied": "Путь скопирован в буфер обмена: {{path}}",
                 "clipboardFallback": "Путь: {{path}}"
             },
@@ -2190,6 +2327,7 @@
             "statSuccess": "Успешно",
             "statFailed": "Ошибка",
             "statSkipped": "Пропущено",
+            "statOffline": "Диск недоступен",
             "statTotal": "Всего проверено",
             "statDuration": "Длительность",
             "successMessage": "Все {count} {type}s успешно обновлены",
@@ -2198,7 +2336,8 @@
             "copyReport": "Копировать отчет",
             "downloadCsv": "Скачать CSV",
             "columnModelName": "Имя модели",
-            "columnError": "Ошибка"
+            "columnError": "Ошибка",
+            "rateLimitedNotice": "Получение прервано: достигнут лимит запросов у поставщика метаданных. Повторно запустите «Получить метаданные с CivitAI» позже, чтобы повторить оставшиеся модели."
         },
         "downloadBatchSummary": {
             "title": "Сводка пакетной загрузки",
@@ -2248,6 +2387,10 @@
             "title": "Инициализация менеджера других моделей",
             "message": "Сканирование и построение кэша моделей. Это может занять несколько минут..."
         },
+        "workflows": {
+            "title": "Инициализация менеджера workflow",
+            "message": "Сканирование и построение кэша workflow. Это может занять несколько минут..."
+        },
         "recipes": {
             "title": "Инициализация менеджера рецептов",
             "message": "Загрузка и обработка рецептов. Это может занять несколько минут..."
@@ -2283,6 +2426,52 @@
                 "description": "Нажмите Ctrl+F (Cmd+F на Mac) для быстрого поиска в текущем представлении.",
                 "alt": "Быстрый поиск"
             }
+        },
+        "error": {
+            "title": "Ошибка инициализации",
+            "message": "При сканировании библиотеки моделей произошла ошибка.",
+            "retry": "Повторить"
+        }
+    },
+    "firstRun": {
+        "title": "Добро пожаловать в LoRA Manager",
+        "description": "Перед началом работы LoRA Manager просканирует вашу библиотеку моделей и создаст sidecar-файлы метаданных. Это одноразовый шаг; его длительность зависит от размера библиотеки и скорости диска.",
+        "libraries": {
+            "loras": "LoRAs",
+            "checkpoints": "Checkpoints",
+            "embeddings": "Embeddings",
+            "other": "Другие модели"
+        },
+        "language": {
+            "label": "Язык"
+        },
+        "libraryStats": "{count} модел(ей) · {size}",
+        "rootMissing": "Папка не найдена",
+        "estimate": "Около {count} модел(ей) ({size}) — примерное время сканирования ~{minutes} мин, в зависимости от размера библиотеки и скорости диска.",
+        "noRoots": {
+            "plugin": "Доступные папки моделей не найдены. Откройте «Настройки», укажите каталоги моделей и перезагрузите страницу.",
+            "standalone": "Доступные папки моделей не найдены. Отредактируйте folder_paths в settings.json и перезапустите сервер."
+        },
+        "sidecar": {
+            "title": "Хранение метаданных",
+            "alongside": {
+                "label": "Рядом с файлами моделей (рекомендуется)",
+                "description": "Файлы метаданных .json хранятся рядом с каждым файлом модели и перемещаются вместе с ним."
+            },
+            "centralized": {
+                "label": "Централизованный каталог",
+                "description": "Метаданные хранятся в отдельном каталоге, поэтому папки моделей остаются чистыми.",
+                "pathPlaceholder": "Каталог централизованного хранения метаданных"
+            }
+        },
+        "actions": {
+            "start": "Начать сканирование",
+            "defer": "Позже"
+        },
+        "errors": {
+            "loadFailed": "Не удалось загрузить сведения о библиотеке.",
+            "pathRequired": "Укажите каталог для централизованного хранения метаданных.",
+            "startFailed": "Не удалось запустить сканирование."
         }
     },
     "duplicates": {
@@ -2323,7 +2512,8 @@
             "embeddingAdded": "Embedding добавлен в workflow",
             "embeddingFailed": "Не удалось добавить embedding",
             "promptSent": "Промпт отправлен в workflow",
-            "promptFailed": "Не удалось отправить промпт"
+            "promptFailed": "Не удалось отправить промпт",
+            "nodeTypeExcluded": "Тип узла \"{type}\" исключён из целей отправки"
         },
         "nodeSelector": {
             "recipe": "Рецепт",
@@ -2333,7 +2523,8 @@
             "replace": "Заменить",
             "append": "Добавить",
             "selectTargetNode": "Выберите целевой узел",
-            "sendToAll": "Отправить во все"
+            "sendToAll": "Отправить во все",
+            "excludeNodeType": "Больше не предлагать этот тип узла"
         },
         "exampleImages": {
             "opened": "Папка с примерами изображений открыта",
@@ -2801,7 +2992,9 @@
             "noItemsSelected": "Не выбрано {type} для удаления",
             "deleteError": "Ошибка: {message}",
             "deleteSuccess": "Успешно удалено {count} {type}",
-            "deleteFailed": "Не удалось удалить {type}: {message}"
+            "deleteFailed": "Не удалось удалить {type}: {message}",
+            "deletePartialFailed": "Не удалось удалить {failed} выбранных {type}: {message}",
+            "cacheUpdateFailed": "Файлы удалены, но кэш библиотеки обновить не удалось. Запустите «Перестроить кэш», чтобы обновить список."
         },
         "controls": {
             "reloadFailed": "Не удалось перезагрузить {pageType}: {message}",
@@ -2815,7 +3008,7 @@
             "contentRatingFailed": "Не удалось установить рейтинг контента: {message}",
             "relinkSuccess": "Модель успешно пересвязана с CivitAI",
             "relinkFailed": "Ошибка: {message}",
-            "linkHfSuccess": "Модель успешно связана с HuggingFace",
+            "linkHfSuccess": "Модель успешно связана с источником модели",
             "linkHfFailed": "Ошибка: {message}",
             "linkCivArchSuccess": "Модель успешно пересвязана через CivitArchive",
             "fetchMetadataFirst": "Пожалуйста, сначала получите метаданные с CivitAI",
@@ -2862,6 +3055,7 @@
             "metadataUpdateComplete": "Обновление метаданных завершено",
             "operationCancelled": "Операция отменена пользователем",
             "operationCancelledPartial": "Операция отменена. Обработано {success} элементов.",
+            "metadataFetchRateLimited": "Получение метаданных прервано из-за ограничения частоты запросов — обновлено {success} из {total}, ошибок: {failed}, пропущено: {skipped}. Повторите получение с CivitAI позже, чтобы обработать остальные модели.",
             "metadataFetchFailed": "Не удалось получить метаданные: {message}",
             "bulkMetadataCompleteAll": "Успешно обновлены все {count} {type}s",
             "bulkMetadataCompletePartial": "Обновлено {success} из {total} {type}s",
@@ -3001,6 +3195,12 @@
             "content": "Сканирование и управление файлами VAE, Upscaler, Text Encoder, CLIP Vision и ControlNet, а также загрузка их с CivitAI — всё на одной отдельной странице.",
             "enable": "Включить другие модели",
             "openSettings": "Открыть настройки"
+        },
+        "bulkFetchPrompt": {
+            "title": "Вдохните жизнь в свою библиотеку",
+            "content": "При первом сканировании найдено {count} модел(ей) без метаданных. Получите их сведения с CivitAI, чтобы добавить изображения превью, описания и триггерные слова.",
+            "fetch": "Получить метаданные",
+            "later": "Может быть, позже"
         },
         "pager": {
             "previous": "Предыдущее уведомление",

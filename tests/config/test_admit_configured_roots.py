@@ -36,6 +36,12 @@ def _normalize(path) -> str:
     return os.path.normpath(str(path)).replace(os.sep, "/")
 
 
+def _fold(paths):
+    """Compare path lists as identities: the code may hand out either spelling."""
+
+    return [_normalize(path) for path in paths]
+
+
 class TestAppendNewPaths:
     def test_appends_without_reordering_or_duplicating(self):
         merged = config_module._append_new_paths(
@@ -60,19 +66,47 @@ class TestAdmitConfiguredRoots:
             loras_roots=[str(primary)],
             _configured_root_paths={"lora": [str(primary), str(drive)]},
         )
-        assert config.configured_roots_for("lora") == [str(primary), str(drive)]
+        assert _fold(config.configured_roots_for("lora")) == _fold([primary, drive])
 
         # Still switched off: nothing to admit.
         assert config.admit_configured_roots() == []
-        assert config.loras_roots == [str(primary)]
+        assert _fold(config.loras_roots) == _fold([primary])
 
         drive.mkdir(parents=True)
         admitted = config.admit_configured_roots()
 
-        assert admitted == [str(drive)]
-        assert config.loras_roots == [str(primary), str(drive)]
+        assert _fold(admitted) == _fold([drive])
+        assert _fold(config.loras_roots) == _fold([primary, drive])
         # Idempotent: a second call adds nothing.
         assert config.admit_configured_roots() == []
+
+    def test_skips_stat_for_roots_already_live(self, tmp_path, monkeypatch):
+        """Admission probes only roots that are not live yet: a single stat is
+        enough to spin up a sleeping drive, so routine scans must not touch
+        healthy, already-admitted roots at all."""
+        primary = tmp_path / "primary"
+        primary.mkdir()
+        offline = tmp_path / "drive-Z" / "loras"
+
+        config = _make_config(
+            loras_roots=[_normalize(primary)],
+            _configured_root_paths={"lora": [str(primary), str(offline)]},
+        )
+
+        probed = []
+        real_exists = os.path.exists
+
+        def tracking_exists(path):
+            probed.append(path)
+            return real_exists(path)
+
+        monkeypatch.setattr(os.path, "exists", tracking_exists)
+
+        assert config.admit_configured_roots() == []
+
+        probed_identities = [_normalize(path) for path in probed]
+        assert _normalize(primary) not in probed_identities
+        assert _normalize(offline) in probed_identities
 
     def test_never_removes_a_root_that_disappeared(self, tmp_path):
         primary = tmp_path / "primary"
@@ -91,7 +125,7 @@ class TestAdmitConfiguredRoots:
         drive.rmdir()
         config.admit_configured_roots()
 
-        assert config.loras_roots == [str(primary), str(drive)]
+        assert _fold(config.loras_roots) == _fold([primary, drive])
 
     def test_admits_every_model_type_and_its_side_maps(self, tmp_path):
         checkpoint_dir = tmp_path / "checkpoints"

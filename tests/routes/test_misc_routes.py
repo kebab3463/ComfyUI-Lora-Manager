@@ -37,6 +37,7 @@ from py.utils.session_logging import (
 )
 from py.routes.misc_route_registrar import MISC_ROUTE_DEFINITIONS, MiscRouteRegistrar
 from py.routes.misc_routes import MiscRoutes
+from py.services.errors import ResourceNotFoundError
 
 
 def _json_payload(response) -> dict[str, Any]:
@@ -44,6 +45,18 @@ def _json_payload(response) -> dict[str, Any]:
     text = response.text
     assert text is not None
     return json.loads(text)
+
+
+def _expected_opener() -> str:
+    """The command the handler uses to open a path on this platform."""
+
+    return "explorer" if os.name == "nt" else "xdg-open"
+
+
+def _posix_only(reason: str):
+    """Mark a test that exercises the POSIX open strategy (xdg-open/dbus)."""
+
+    return pytest.mark.skipif(os.name == "nt", reason=reason)
 
 
 class FakeRequest:
@@ -66,6 +79,9 @@ class DummySettings:
 
     def is_other_models_enabled(self):
         return bool(self.data.get("enable_other_models", False))
+
+    def is_workflows_enabled(self):
+        return bool(self.data.get("enable_workflows", False))
 
     def get_enabled_other_sub_types(self):
         return list(self.data.get("enabled_other_sub_types") or [])
@@ -635,7 +651,7 @@ async def test_open_backup_location_uses_settings_directory(tmp_path, monkeypatc
     assert response.status == 200
     assert payload["success"] is True
     assert payload["path"] == str(backup_dir)
-    assert calls == [["xdg-open", str(backup_dir)]]
+    assert calls == [[_expected_opener(), str(backup_dir)]]
 
 
 @pytest.mark.asyncio
@@ -666,9 +682,10 @@ async def test_open_sidecar_location_opens_configured_root(tmp_path, monkeypatch
     assert payload["path"] == str(root)
     # Created on demand so the button works before any migration ran.
     assert root.is_dir()
-    assert calls == [["xdg-open", str(root)]]
+    assert calls == [[_expected_opener(), str(root)]]
 
 
+@_posix_only("the headless clipboard fallback is the POSIX strategy; Windows always has a shell")
 @pytest.mark.asyncio
 async def test_open_sidecar_location_headless_returns_clipboard_mode(tmp_path, monkeypatch):
     """Without a GUI session xdg-open cannot work; the handler must hand the
@@ -720,6 +737,7 @@ async def test_get_settings_includes_resolved_sidecar_root(tmp_path):
     assert payload["settings"]["sidecar_storage_root_in_repo"] is False
 
 
+@_posix_only("the headless clipboard fallback is the POSIX strategy; Windows always has a shell")
 @pytest.mark.asyncio
 async def test_open_settings_location_headless_returns_clipboard_mode(tmp_path, monkeypatch):
     """Without a GUI session xdg-open cannot work; the handler must hand the
@@ -773,7 +791,11 @@ async def test_open_settings_location_with_display_opens_folder(tmp_path, monkey
 
     assert response.status == 200
     assert payload["success"] is True
-    assert calls == [["xdg-open", str(settings_file.parent)]]
+    if os.name == "nt":
+        # explorer reveals the file itself, there is no "open the folder" call.
+        assert calls == [["explorer", "/select,", str(settings_file)]]
+    else:
+        assert calls == [[_expected_opener(), str(settings_file.parent)]]
 
 
 @pytest.mark.asyncio
@@ -806,7 +828,258 @@ async def test_open_wildcards_location_creates_and_opens_directory(tmp_path, mon
     assert payload["success"] is True
     assert payload["path"] == str(wildcards_dir)
     assert wildcards_dir.is_dir()
-    assert calls == [["xdg-open", str(wildcards_dir)]]
+    assert calls == [[_expected_opener(), str(wildcards_dir)]]
+
+
+@_posix_only("dbus file-manager selection is Linux-only")
+@pytest.mark.asyncio
+async def test_open_file_location_linux_selects_via_dbus(tmp_path, monkeypatch):
+    """On a Linux desktop the handler should ask the freedesktop FileManager1
+    DBus service to open the folder with the file selected."""
+    model_file = tmp_path / "model.safetensors"
+    model_file.write_text("x", encoding="utf-8")
+
+    handler = FileSystemHandler(settings_service=SimpleNamespace())
+
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_docker", lambda: False)
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_wsl", lambda: False)
+
+    run_calls = []
+    popen_calls = []
+
+    def fake_run(args, **kwargs):
+        run_calls.append(args)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: popen_calls.append(args))
+
+    request = FakeRequest(json_data={"file_path": str(model_file)})
+    response = await handler.open_file_location(request)  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert response.status == 200
+    assert payload["success"] is True
+    assert len(run_calls) == 1
+    dbus_cmd = run_calls[0]
+    assert dbus_cmd[0] == "dbus-send"
+    assert any(
+        arg.startswith("array:string:file://") and "model.safetensors" in arg
+        for arg in dbus_cmd
+    )
+    assert popen_calls == []
+
+
+@_posix_only("xdg-open is the Linux opener")
+@pytest.mark.asyncio
+async def test_open_file_location_linux_falls_back_to_xdg_open(tmp_path, monkeypatch):
+    """When the FileManager1 DBus interface is unavailable, fall back to
+    opening the containing folder with xdg-open."""
+    model_file = tmp_path / "model.safetensors"
+    model_file.write_text("x", encoding="utf-8")
+
+    handler = FileSystemHandler(settings_service=SimpleNamespace())
+
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_docker", lambda: False)
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_wsl", lambda: False)
+
+    popen_calls = []
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=1)
+    )
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *args, **kwargs: popen_calls.append(args[0])
+    )
+
+    request = FakeRequest(json_data={"file_path": str(model_file)})
+    response = await handler.open_file_location(request)  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert response.status == 200
+    assert payload["success"] is True
+    assert popen_calls == [[_expected_opener(), str(tmp_path)]]
+
+
+@_posix_only("the headless clipboard fallback is the POSIX strategy; Windows always has a shell")
+@pytest.mark.asyncio
+async def test_open_file_location_headless_returns_clipboard_mode(tmp_path, monkeypatch):
+    """Without a GUI session there is no file manager to open; the handler
+    must hand the path to the browser instead of failing silently."""
+    model_file = tmp_path / "model.safetensors"
+    model_file.write_text("x", encoding="utf-8")
+
+    handler = FileSystemHandler(settings_service=SimpleNamespace())
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_docker", lambda: False)
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_wsl", lambda: False)
+
+    popen_calls = []
+    run_calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: popen_calls.append(args))
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: run_calls.append(args))
+
+    request = FakeRequest(json_data={"file_path": str(model_file)})
+    response = await handler.open_file_location(request)  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert response.status == 200
+    assert payload["success"] is True
+    assert payload["mode"] == "clipboard"
+    assert payload["path"] == str(model_file)
+    assert popen_calls == []
+    assert run_calls == []
+
+
+def _patch_linux_desktop(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_docker", lambda: False)
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_wsl", lambda: False)
+
+
+@_posix_only("file-manager reveal via dbus is Linux-only")
+@pytest.mark.asyncio
+async def test_open_model_sidecar_location_reveals_metadata_file(tmp_path, monkeypatch):
+    """Centralized mode: the resolved .metadata.json is revealed selected,
+    even though it lives in the mirror tree rather than next to the model."""
+    model_file = tmp_path / "model.safetensors"
+    model_file.write_text("x", encoding="utf-8")
+    metadata_file = tmp_path / "mirror" / "model.metadata.json"
+    metadata_file.parent.mkdir(parents=True)
+    metadata_file.write_text("{}", encoding="utf-8")
+
+    handler = FileSystemHandler(settings_service=SimpleNamespace())
+    _patch_linux_desktop(monkeypatch)
+    monkeypatch.setattr(
+        "py.routes.handlers.misc_handlers.get_metadata_path",
+        lambda path: str(metadata_file),
+    )
+
+    run_calls = []
+    popen_calls = []
+    monkeypatch.setattr(
+        subprocess, "run", lambda *args, **kwargs: run_calls.append(args[0]) or SimpleNamespace(returncode=0)
+    )
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: popen_calls.append(args))
+
+    request = FakeRequest(json_data={"file_path": str(model_file)})
+    response = await handler.open_model_sidecar_location(request)  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert response.status == 200
+    assert payload["success"] is True
+    assert payload["path"] == str(metadata_file)
+    assert len(run_calls) == 1
+    assert any("model.metadata.json" in arg for arg in run_calls[0])
+    assert popen_calls == []
+
+
+@pytest.mark.asyncio
+async def test_open_model_sidecar_location_falls_back_to_sidecar_dir(tmp_path, monkeypatch):
+    """When the sidecar has not been written yet, open the sidecar directory
+    itself instead of reporting an error."""
+    model_file = tmp_path / "model.safetensors"
+    model_file.write_text("x", encoding="utf-8")
+    sidecar_dir = tmp_path / "mirror"
+    sidecar_dir.mkdir()
+
+    handler = FileSystemHandler(settings_service=SimpleNamespace())
+    _patch_linux_desktop(monkeypatch)
+    monkeypatch.setattr(
+        "py.routes.handlers.misc_handlers.get_metadata_path",
+        lambda path: str(sidecar_dir / "model.metadata.json"),
+    )
+    monkeypatch.setattr(
+        "py.routes.handlers.misc_handlers.get_sidecar_dir",
+        lambda path: str(sidecar_dir),
+    )
+
+    popen_calls = []
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *args, **kwargs: popen_calls.append(args[0])
+    )
+
+    request = FakeRequest(json_data={"file_path": str(model_file)})
+    response = await handler.open_model_sidecar_location(request)  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert response.status == 200
+    assert payload["success"] is True
+    assert payload["path"] == str(sidecar_dir)
+    assert popen_calls == [[_expected_opener(), str(sidecar_dir)]]
+
+
+@pytest.mark.asyncio
+async def test_open_model_sidecar_location_missing_sidecar_returns_404(tmp_path, monkeypatch):
+    model_file = tmp_path / "model.safetensors"
+    model_file.write_text("x", encoding="utf-8")
+    missing_dir = tmp_path / "missing"
+
+    handler = FileSystemHandler(settings_service=SimpleNamespace())
+    monkeypatch.setattr(
+        "py.routes.handlers.misc_handlers.get_metadata_path",
+        lambda path: str(missing_dir / "model.metadata.json"),
+    )
+    monkeypatch.setattr(
+        "py.routes.handlers.misc_handlers.get_sidecar_dir",
+        lambda path: str(missing_dir),
+    )
+
+    request = FakeRequest(json_data={"file_path": str(model_file)})
+    response = await handler.open_model_sidecar_location(request)  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert response.status == 404
+    assert payload["success"] is False
+
+
+@_posix_only("the headless clipboard fallback is the POSIX strategy; Windows always has a shell")
+@pytest.mark.asyncio
+async def test_open_model_sidecar_location_headless_returns_clipboard_mode(tmp_path, monkeypatch):
+    model_file = tmp_path / "model.safetensors"
+    model_file.write_text("x", encoding="utf-8")
+    metadata_file = tmp_path / "mirror" / "model.metadata.json"
+    metadata_file.parent.mkdir(parents=True)
+    metadata_file.write_text("{}", encoding="utf-8")
+
+    handler = FileSystemHandler(settings_service=SimpleNamespace())
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_docker", lambda: False)
+    monkeypatch.setattr("py.routes.handlers.misc_handlers._is_wsl", lambda: False)
+    monkeypatch.setattr(
+        "py.routes.handlers.misc_handlers.get_metadata_path",
+        lambda path: str(metadata_file),
+    )
+
+    popen_calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: popen_calls.append(args))
+
+    request = FakeRequest(json_data={"file_path": str(model_file)})
+    response = await handler.open_model_sidecar_location(request)  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert response.status == 200
+    assert payload["success"] is True
+    assert payload["mode"] == "clipboard"
+    assert payload["path"] == str(metadata_file)
+    assert popen_calls == []
+
+
+@pytest.mark.asyncio
+async def test_open_model_sidecar_location_validates_input(tmp_path):
+    handler = FileSystemHandler(settings_service=SimpleNamespace())
+
+    response = await handler.open_model_sidecar_location(FakeRequest())  # pyright: ignore[reportArgumentType]
+    assert response.status == 400
+
+    request = FakeRequest(json_data={"file_path": str(tmp_path / "missing.safetensors")})
+    response = await handler.open_model_sidecar_location(request)  # pyright: ignore[reportArgumentType]
+    assert response.status == 404
 
 
 class RecordingRouter:
@@ -949,6 +1222,47 @@ async def test_register_nodes_defaults_graph_name_to_none():
     registry = await node_registry.get_merged_registry()
     stored_node = next(iter(registry["nodes"].values()))
     assert stored_node["graph_name"] is None
+
+
+@pytest.mark.asyncio
+async def test_register_nodes_passes_through_exclude_send():
+    node_registry = NodeRegistry()
+    handler = NodeRegistryHandler(
+        node_registry=node_registry,
+        prompt_server=FakePromptServer,  # pyright: ignore[reportArgumentType]
+        standalone_mode=False,
+    )
+
+    request = FakeRequest(
+        json_data={
+            "nodes": [
+                {
+                    "node_id": 10,
+                    "graph_id": "root",
+                    "type": "CLIPTextEncode",
+                    "title": "Excluded Encoder",
+                    "exclude_send": True,
+                },
+                {
+                    "node_id": 11,
+                    "graph_id": "root",
+                    "type": "CLIPTextEncode",
+                    "title": "Normal Encoder",
+                },
+            ],
+            "client_id": "test-client-1",
+        }
+    )
+
+    response = await handler.register_nodes(request)  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert payload["success"] is True
+
+    registry = await node_registry.get_merged_registry()
+    nodes = registry["nodes"]
+    assert nodes["root:10"]["exclude_send"] is True
+    assert nodes["root:11"]["exclude_send"] is False
 
 
 @pytest.mark.asyncio
@@ -2616,6 +2930,119 @@ async def test_get_init_status_reports_pending_scanners():
     assert "lora" not in payload["details"]
 
 
+async def test_get_init_status_scopes_to_requesting_page():
+    """?page= mirrors the WebSocket per-pageType completion semantics."""
+
+    async def ready_scanner():
+        return SimpleNamespace(_cache=object(), is_initializing=lambda: False)
+
+    async def initializing_scanner():
+        return SimpleNamespace(_cache=object(), is_initializing=lambda: True)
+
+    handler = HealthCheckHandler(
+        scanner_getters={
+            "lora": ready_scanner,
+            "checkpoint": initializing_scanner,
+        }
+    )
+
+    # The loras page only waits for the lora scanner, even while the
+    # checkpoint scan is still running.
+    response = await handler.get_init_status(FakeRequest(method="GET", query={"page": "loras"}))  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+    assert payload["status"] == "complete"
+
+    # The checkpoints page keeps waiting for its own scanner.
+    response = await handler.get_init_status(FakeRequest(method="GET", query={"page": "checkpoints"}))  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+    assert payload["status"] == "initializing"
+    assert "checkpoint" in payload["details"]
+
+    # No page parameter: aggregate behaviour (every scanner must be done).
+    response = await handler.get_init_status(FakeRequest(method="GET"))  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+    assert payload["status"] == "initializing"
+
+
+async def test_get_init_status_reports_scanner_errors():
+    """A failed initial scan must not masquerade as 'complete'."""
+
+    async def failed_scanner():
+        return SimpleNamespace(
+            _cache=object(),
+            is_initializing=lambda: False,
+            _init_error="disk unreadable",
+        )
+
+    async def ready_scanner():
+        return SimpleNamespace(_cache=object(), is_initializing=lambda: False)
+
+    handler = HealthCheckHandler(
+        scanner_getters={
+            "lora": failed_scanner,
+            "checkpoint": ready_scanner,
+        }
+    )
+
+    response = await handler.get_init_status(FakeRequest(method="GET"))  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+    assert payload["status"] == "error"
+    assert "disk unreadable" in payload["details"]
+
+    # Scoped to a healthy page, the failure of another scanner is irrelevant.
+    response = await handler.get_init_status(FakeRequest(method="GET", query={"page": "checkpoints"}))  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+    assert payload["status"] == "complete"
+
+    # A busy scanner takes precedence over a stale error record.
+    async def busy_scanner():
+        return SimpleNamespace(
+            _cache=object(),
+            is_initializing=lambda: True,
+            _init_error="stale",
+        )
+
+    handler = HealthCheckHandler(scanner_getters={"lora": busy_scanner})
+    response = await handler.get_init_status(FakeRequest(method="GET"))  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+    assert payload["status"] == "initializing"
+
+
+async def test_get_metadata_fetch_candidates_counts_eligible_models():
+    async def lora_scanner():
+        return SimpleNamespace(
+            _cache=SimpleNamespace(
+                raw_data=[
+                    {"folder": ""},  # candidate: no metadata yet
+                    {"folder": "", "civitai": {"id": 1}},  # already fetched
+                    {"folder": "", "skip_metadata_refresh": True},  # opted out
+                ]
+            ),
+        )
+
+    async def no_cache_scanner():
+        return SimpleNamespace(_cache=None)
+
+    async def recipe_scanner():
+        return SimpleNamespace(_cache=SimpleNamespace(raw_data=[{"folder": ""}]))
+
+    handler = HealthCheckHandler(
+        scanner_getters={
+            "lora": lora_scanner,
+            "checkpoint": no_cache_scanner,
+            "recipe": recipe_scanner,
+        }
+    )
+
+    response = await handler.get_metadata_fetch_candidates(FakeRequest(method="GET"))  # pyright: ignore[reportArgumentType]
+    payload = _json_payload(response)
+
+    assert payload["success"] is True
+    assert payload["counts"] == {"loras": 1, "checkpoints": 0}
+    # Recipes have no bulk metadata fetch, so they are never reported.
+    assert "recipes" not in payload["counts"]
+
+
 class StaticMetadataProvider:
     """Metadata provider returning one fixed CivitAI model payload."""
 
@@ -2746,6 +3173,38 @@ async def test_get_model_versions_status_supported_type_stays_interactive():
             "hasBeenDownloaded": False,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_model_versions_status_surfaces_not_found_details():
+    """A missing CivitAI model keeps the provider's diagnostic message."""
+
+    class NotFoundProvider:
+        async def get_model_versions(self, _model_id):
+            raise ResourceNotFoundError("Civitai model 3390681 was not found")
+
+    async def metadata_factory():
+        return NotFoundProvider()
+
+    handler = ModelLibraryHandler(
+        ServiceRegistryAdapter(
+            get_lora_scanner=fake_scanner_factory,
+            get_checkpoint_scanner=fake_scanner_factory,
+            get_embedding_scanner=fake_scanner_factory,
+            get_other_scanner=fake_scanner_factory,
+            get_downloaded_version_history_service=fake_download_history_service_factory,
+        ),
+        metadata_provider_factory=metadata_factory,
+    )
+
+    response = await handler.get_model_versions_status(
+        FakeRequest(query={"modelId": "3390681"})  # pyright: ignore[reportArgumentType]
+    )
+    payload = _json_payload(response)
+
+    assert response.status == 404
+    assert payload["success"] is False
+    assert "3390681" in payload["error"]
 
 
 class DummySidecarMigrationUseCase:
@@ -2899,6 +3358,7 @@ def _stub_misc_handler_set(**overrides) -> MiscHandlerSet:
         "agent_handler",
         "download_routing",
         "sidecar_migration",
+        "first_run",
     )
     handlers = {name: _AnyHandler() for name in names}
     handlers.update(overrides)

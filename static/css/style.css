@@ -20,6 +20,7 @@
 @import 'components/modal/download-modal.css';
 @import 'components/modal/directory-picker-modal.css';
 @import 'components/toast.css';
+@import 'components/tooltip.css';
 @import 'components/loading.css';
 @import 'components/menu.css';
 @import 'components/lora-modal/lora-modal.css';
@@ -35,6 +36,7 @@
 @import 'components/shared.css';
 @import 'components/filter-indicator.css';
 @import 'components/initialization.css';
+@import 'components/first_run.css';
 @import 'components/progress-panel.css';
 @import 'components/duplicates.css'; /* Add duplicates component */
 

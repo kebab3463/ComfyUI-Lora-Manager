@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import logging
 import os
 from concurrent.futures import Future
 
@@ -131,6 +132,58 @@ def test_existing_folder_paths_seed_default_library(tmp_path, monkeypatch):
     assert libraries["default"]["folder_paths"]["embeddings"] == [str(embedding_dir)]
 
     assert manager.get_startup_messages() == []
+
+
+def test_multi_library_configuration_triggers_deprecation_warning(
+    tmp_path, monkeypatch, caplog
+):
+    initial = {
+        "libraries": {
+            "default": {"folder_paths": {"loras": ["/loras-a"]}},
+            "archive": {"folder_paths": {"loras": ["/loras-b"]}},
+        },
+        "active_library": "default",
+    }
+
+    with caplog.at_level(logging.WARNING, logger="py.services.settings_manager"):
+        manager = _create_manager_with_settings(tmp_path, monkeypatch, initial)
+
+    assert any(
+        "Multi-library support is deprecated" in record.getMessage()
+        for record in caplog.records
+    )
+    deprecation = [
+        message
+        for message in manager.get_startup_messages()
+        if message["code"] == "multi-library-deprecated"
+    ]
+    assert len(deprecation) == 1
+    assert deprecation[0]["severity"] == "warning"
+    assert deprecation[0]["dismissible"] is True
+    assert "archive" in deprecation[0]["message"]
+
+
+def test_single_library_configuration_has_no_deprecation_warning(
+    tmp_path, monkeypatch, caplog
+):
+    initial = {
+        "libraries": {
+            "default": {"folder_paths": {"loras": ["/loras-a"]}},
+        },
+        "active_library": "default",
+    }
+
+    with caplog.at_level(logging.WARNING, logger="py.services.settings_manager"):
+        manager = _create_manager_with_settings(tmp_path, monkeypatch, initial)
+
+    assert not any(
+        "Multi-library support is deprecated" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not any(
+        message["code"] == "multi-library-deprecated"
+        for message in manager.get_startup_messages()
+    )
 
 
 def test_environment_variable_overrides_settings(tmp_path, monkeypatch):
@@ -1513,3 +1566,366 @@ def test_migrate_sanitizes_legacy_libraries_includes_other_roots(tmp_path, monke
 
     payload = manager.get_libraries()["legacy"]
     assert payload["default_other_roots"] == {}
+
+
+def _configure_lora_roots(manager, *roots):
+    manager.settings["folder_paths"] = {"loras": [str(root) for root in roots]}
+
+
+def test_download_root_rules_defaults_to_empty_per_type(manager):
+    assert manager.get_download_root_rules() == {
+        "loras": [],
+        "checkpoints": [],
+        "unet": [],
+        "embeddings": [],
+    }
+
+
+def test_download_root_rules_normalize_keeps_valid_rules_in_order(manager):
+    _configure_lora_roots(manager, "/loras-main", "/loras-archive")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {
+                "match_type": "base_model",
+                "match": ["Flux.1 D", "Wan Video"],
+                "root": "/loras-archive",
+            },
+            {"match_type": "base_model", "match": ["Pony"], "root": "/loras-main"},
+        ]
+    }
+
+    result = manager.get_download_root_rules()
+
+    assert result["loras"] == [
+        {
+            "match_type": "base_model",
+            "match": ["Flux.1 D", "Wan Video"],
+            "root": "/loras-archive",
+        },
+        {"match_type": "base_model", "match": ["Pony"], "root": "/loras-main"},
+    ]
+    assert manager.settings["download_root_rules"]["loras"] == result["loras"]
+
+
+def test_download_root_rules_normalize_drops_invalid_match_values(manager):
+    _configure_lora_roots(manager, "/loras-archive")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {
+                "match_type": "base_model",
+                "match": ["Flux.1 D", "Not A Model", "Flux.1 D", 42, ""],
+                "root": "/loras-archive",
+            }
+        ]
+    }
+
+    result = manager.get_download_root_rules()
+
+    assert result["loras"] == [
+        {"match_type": "base_model", "match": ["Flux.1 D"], "root": "/loras-archive"}
+    ]
+
+
+def test_download_root_rules_normalize_drops_rule_with_unknown_root(
+    manager, caplog
+):
+    _configure_lora_roots(manager, "/loras-main")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {
+                "match_type": "base_model",
+                "match": ["Flux.1 D"],
+                "root": "/not-configured",
+            },
+            {"match_type": "base_model", "match": ["Pony"], "root": "/loras-main"},
+        ]
+    }
+
+    with caplog.at_level(logging.WARNING):
+        result = manager.get_download_root_rules()
+
+    assert result["loras"] == [
+        {"match_type": "base_model", "match": ["Pony"], "root": "/loras-main"}
+    ]
+    assert "/not-configured" in caplog.text
+
+
+def test_download_root_rules_root_matches_with_slash_normalization(manager):
+    _configure_lora_roots(manager, "/loras-archive/")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {"match_type": "base_model", "match": ["Flux.1 D"], "root": "/loras-archive"}
+        ]
+    }
+
+    result = manager.get_download_root_rules()
+
+    assert result["loras"][0]["root"] == "/loras-archive"
+
+
+def test_download_root_rules_accepts_extra_folder_paths_roots(manager):
+    _configure_lora_roots(manager, "/loras-main")
+    manager.settings["extra_folder_paths"] = {"loras": ["/loras-extra"]}
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {"match_type": "base_model", "match": ["Flux.1 D"], "root": "/loras-extra"}
+        ]
+    }
+
+    result = manager.get_download_root_rules()
+
+    assert result["loras"][0]["root"] == "/loras-extra"
+
+
+def test_download_root_rules_normalize_drops_unknown_match_type(manager, caplog):
+    _configure_lora_roots(manager, "/loras-archive")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {"match_type": "tags", "match": ["Flux.1 D"], "root": "/loras-archive"}
+        ]
+    }
+
+    with caplog.at_level(logging.WARNING):
+        result = manager.get_download_root_rules()
+
+    assert result["loras"] == []
+    assert "tags" in caplog.text
+
+
+def test_download_root_rules_normalize_drops_malformed_input(manager):
+    _configure_lora_roots(manager, "/loras-archive")
+
+    assert manager.normalize_download_root_rules(None) == {
+        "loras": [],
+        "checkpoints": [],
+        "unet": [],
+        "embeddings": [],
+    }
+    assert manager.normalize_download_root_rules("not-a-dict")["loras"] == []
+    assert manager.normalize_download_root_rules({"loras": "not-a-list"})[
+        "loras"
+    ] == []
+    assert manager.normalize_download_root_rules({"loras": ["not-a-dict", 42]})[
+        "loras"
+    ] == []
+    # Unknown type keys are dropped; known keys survive.
+    result = manager.normalize_download_root_rules(
+        {
+            "videos": [
+                {"match_type": "base_model", "match": ["Pony"], "root": "/x"}
+            ],
+            "loras": [
+                {
+                    "match_type": "base_model",
+                    "match": ["Flux.1 D"],
+                    "root": "/loras-archive",
+                }
+            ],
+        }
+    )
+    assert "videos" not in result
+    assert len(result["loras"]) == 1
+
+
+def test_download_root_rules_normalize_drops_rule_with_empty_match(manager):
+    _configure_lora_roots(manager, "/loras-archive")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {"match_type": "base_model", "match": ["Not A Model"], "root": "/loras-archive"}
+        ]
+    }
+
+    result = manager.get_download_root_rules()
+
+    assert result["loras"] == []
+
+
+def test_set_download_root_rules_normalizes(manager):
+    _configure_lora_roots(manager, "/loras-main", "/loras-archive")
+
+    manager.set(
+        "download_root_rules",
+        {
+            "loras": [
+                {
+                    "match_type": "base_model",
+                    "match": ["Flux.1 D", "Invalid"],
+                    "root": "/loras-archive",
+                }
+            ]
+        },
+    )
+
+    assert manager.get("download_root_rules")["loras"] == [
+        {"match_type": "base_model", "match": ["Flux.1 D"], "root": "/loras-archive"}
+    ]
+
+
+def test_download_root_rules_normalize_keeps_tag_rules_with_free_text(manager):
+    """Tag rules accept arbitrary free-text tags (no base model whitelist),
+    trimmed and deduplicated case-insensitively."""
+    _configure_lora_roots(manager, "/loras-archive")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {
+                "match_type": "tag",
+                "match": [" character ", "Style", "STYLE", 42, ""],
+                "root": "/loras-archive",
+            }
+        ]
+    }
+
+    result = manager.get_download_root_rules()
+
+    assert result["loras"] == [
+        {
+            "match_type": "tag",
+            "match": ["character", "Style"],
+            "root": "/loras-archive",
+        }
+    ]
+
+
+def test_download_root_rules_normalize_drops_tag_rule_with_empty_match(manager, caplog):
+    _configure_lora_roots(manager, "/loras-archive")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {"match_type": "tag", "match": ["", "  "], "root": "/loras-archive"}
+        ]
+    }
+
+    with caplog.at_level(logging.WARNING):
+        result = manager.get_download_root_rules()
+
+    assert result["loras"] == []
+    assert "tag" in caplog.text
+
+
+def test_download_root_rules_normalize_preserves_mixed_rule_order(manager):
+    """base_model and tag rules can be interleaved; order is significant."""
+    _configure_lora_roots(manager, "/nas", "/main")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {"match_type": "tag", "match": ["character"], "root": "/nas"},
+            {"match_type": "base_model", "match": ["Pony"], "root": "/main"},
+        ]
+    }
+
+    result = manager.get_download_root_rules()
+
+    assert [rule["match_type"] for rule in result["loras"]] == [
+        "tag",
+        "base_model",
+    ]
+    assert [rule["root"] for rule in result["loras"]] == ["/nas", "/main"]
+
+
+def test_download_root_rules_tag_rules_still_validate_root(manager, caplog):
+    _configure_lora_roots(manager, "/loras-main")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {"match_type": "tag", "match": ["character"], "root": "/not-configured"}
+        ]
+    }
+
+    with caplog.at_level(logging.WARNING):
+        result = manager.get_download_root_rules()
+
+    assert result["loras"] == []
+    assert "/not-configured" in caplog.text
+
+
+def test_download_skip_base_models_accept_remote_only_models(manager, monkeypatch):
+    """Base models missing from the hardcoded list (new CivitAI families) must
+    survive validation once the merged vocabulary knows them."""
+    monkeypatch.setattr(
+        settings_manager_module,
+        "_get_supported_base_models",
+        lambda: {"SDXL 1.0", "Qwen 3"},
+    )
+
+    manager.set("download_skip_base_models", ["Qwen 3", "SDXL 1.0", "Not A Model"])
+
+    assert manager.get("download_skip_base_models") == ["Qwen 3", "SDXL 1.0"]
+
+
+def test_download_skip_base_models_fall_back_to_hardcoded_list(manager, monkeypatch):
+    """When the merged vocabulary is unavailable, the hardcoded list decides."""
+    monkeypatch.setattr(
+        settings_manager_module,
+        "_get_supported_base_models",
+        lambda: {"SDXL 1.0"},
+    )
+
+    manager.set("download_skip_base_models", ["Qwen 3", "SDXL 1.0"])
+
+    assert manager.get("download_skip_base_models") == ["SDXL 1.0"]
+
+
+def test_download_root_rules_accept_remote_only_base_models(manager, monkeypatch):
+    monkeypatch.setattr(
+        settings_manager_module,
+        "_get_supported_base_models",
+        lambda: {"Flux.1 D", "Flux.3"},
+    )
+    _configure_lora_roots(manager, "/loras-archive")
+    manager.settings["download_root_rules"] = {
+        "loras": [
+            {
+                "match_type": "base_model",
+                "match": ["Flux.3", "Flux.1 D"],
+                "root": "/loras-archive",
+            }
+        ]
+    }
+
+    result = manager.get_download_root_rules()
+
+    assert result["loras"] == [
+        {
+            "match_type": "base_model",
+            "match": ["Flux.3", "Flux.1 D"],
+            "root": "/loras-archive",
+        }
+    ]
+
+
+def test_get_workflow_folder_paths_defaults_to_empty(manager):
+    assert manager.get_workflow_folder_paths() == []
+
+
+def test_set_workflow_folder_paths_merges_into_active_library(manager):
+    _configure_lora_roots(manager, "/loras-main")
+
+    result = manager.set_workflow_folder_paths(["/workflows", " /workflows ", ""])
+
+    assert result == ["/workflows"]
+    # Core keys are preserved; workflows rides the same folder_paths map.
+    assert manager.settings["folder_paths"] == {
+        "loras": ["/loras-main"],
+        "workflows": ["/workflows"],
+    }
+    assert manager.get_workflow_folder_paths() == ["/workflows"]
+    active = manager.get_active_library()
+    assert active.get("folder_paths", {}).get("workflows") == ["/workflows"]
+
+
+def test_set_workflow_folder_paths_empty_removes_key(manager):
+    manager.set_workflow_folder_paths(["/workflows"])
+
+    result = manager.set_workflow_folder_paths([])
+
+    assert result == []
+    assert "workflows" not in manager.settings["folder_paths"]
+    assert manager.get_workflow_folder_paths() == []
+
+
+def test_set_workflow_folder_paths_rejects_overlap_with_other_library(manager):
+    manager.settings["libraries"] = {
+        "default": manager.get_active_library(),
+        "other": {"folder_paths": {"workflows": ["/shared-workflows"]}},
+    }
+    manager.settings["active_library"] = "default"
+
+    with pytest.raises(ValueError):
+        manager.set_workflow_folder_paths(["/shared-workflows"])

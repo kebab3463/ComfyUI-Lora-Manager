@@ -4,7 +4,7 @@ This document is the canonical set of conventions for translating LoRA Manager U
 It applies to **human translators and AI agents** alike. Read it before editing anything in
 `locales/`.
 
-Source of truth: `locales/en.json` (10 locales, 2128 leaf keys; all locales share the exact
+Source of truth: `locales/en.json` (10 locales, 2308 leaf keys; all locales share the exact
 same key structure).
 
 Locales: `en`, `zh-CN`, `zh-TW`, `ja`, `ko`, `fr`, `de`, `es`, `ru`, `he` (RTL).
@@ -194,6 +194,62 @@ Locales: `en`, `zh-CN`, `zh-TW`, `ja`, `ko`, `fr`, `de`, `es`, `ru`, `he` (RTL).
 > locales (terminology below). The `en.json` wording was normalized to the established **model
 > root** noun while translating (`library root` → `model root`, R5); the count-bearing
 > `successMulti` uses the singular `success` key when only one copy was removed.
+
+> **Status (2026-10, model-modal sidecar location):** the model modal's Location row gained
+> an inline "open metadata location" icon button (rendered only in centralized sidecar
+> storage mode), adding 5 keys (`modals.model.actions.openSidecarLocation` and the 4
+> `modals.model.openSidecarLocation.*` toasts). The renderings mirror each locale's sibling
+> `openFileLocation` block verbatim with the §5 "metadata" noun swapped in, so no new
+> terminology was introduced. All 9 locales are translated, so the "no remaining
+> placeholders" claim holds again.
+
+> **Status (2026-10, download root rules):** the Download Root Rules editor (Settings →
+> Organization, per model type) routes downloads to a non-default root by base model or tag
+> match, and the download modal names the rule that matched. That added 26 keys —
+> `settings.downloadRootRules.*` (24) and `modals.download.routedByRule.baseModel` /
+> `.tag` — translated in all 9 locales (terminology in §2, "Download root rules
+> feature"). One source fix came with the pass: `summary.selectBaseModels` /
+> `summary.enterTags` used U+2026 `…`, which violates R7, so `en.json` now uses ASCII
+> `...` (the JS fallback strings in `SettingsManager.js` moved with it). The `…` in
+> `truncateMiddlePath` stays — it is a code-level path-elision character, not a locale
+> string. No remaining `[TODO: Translate]` placeholders.
+
+> **Status (2026-10, filter count tooltips):** the counted chips of the filter panel, the
+> All Types dropdown options and the Refresh scope rows gained an **always-on** hover string
+> carrying the full name plus the exact count (`{name} — {count} models`, and
+> `recipes.filter.countTitle` on the Recipes page, whose chips count recipes). The hover text
+> is deliberately not tied to whether the on-screen number was abbreviated — an affordance
+> that exists only above a threshold is undiscoverable, and the name is what CSS ellipsizes on
+> a narrow chip. The abbreviation itself starts at 10,000 and is used **only where the
+> locale's `Intl` compact form is a real unit and narrower than the plain number**: German has
+> no compact unit below a million, so it keeps `18.475` rather than the rounded `18.500`, and
+> Russian keeps `18 475` rather than the wider `18,5 тыс.` (rule and rationale in
+> `static/js/utils/formatters.js`). The same pass translated the 4 leftover
+> `sidebar.deleteFolder*` placeholders (folder missing on disk → remove from list), so no
+> `[TODO: Translate]` remains in any locale.
+
+> **Status (2026-10, first-run welcome page and fetch status):** the first launch is gated
+> behind a welcome page (`firstRun.*`), which shipped together with the initialization failure
+> state, the bulk-fetch rate-limit copy, the "fetch metadata" post-scan banner, two download
+> link errors and two duplicate-delete follow-ups — 36 keys left behind as
+> `[TODO: Translate]`. All 36 are now translated in all 9 locales (renderings in §2, "First-run
+> welcome page and fetch-status copy"). The same pass re-translated the three keys whose English
+> text had changed without being re-queued: `settings.folderSettings.activeLibrary` /
+> `.activeLibraryHelp` (multi-library deprecation, commit `1a6b0f78`) and
+> `toast.contextMenu.linkHfSuccess` (the toast now says "model source" instead of
+> "HuggingFace", commit `5ab0e88ab`). No `[TODO: Translate]` placeholder remains.
+
+> **Status (2026-10, workflow management):** the Workflows page (`workflows.*`) manages the
+> ComfyUI workflow JSON files in their own library folders and shipped with the settings toggle
+> and folder list (`settings.folderSettings.enableWorkflows*` / `.workflowFolders*`), the folder
+> key label, the two folder-list nav paths and the initialization progress text — 41 keys
+> `[TODO: Translate]` in all 9 locales, now translated (terminology in §2, "Workflows feature").
+> `Workflow` reuses the term already fixed in §5 per locale: Latin in fr/de/es/ru/he (so
+> `header.navigation.workflows` and `workflows.title` stay `Workflows` there), 工作流 in
+> zh-CN/zh-TW, ワークフロー in ja, 워크플로 in ko. The three `workflows.noPaths.open*` buttons are
+> byte-identical to `other.noPaths.open*` (same actions), and the nav-path hints reuse
+> `other.disabled.hint`'s "Settings > Library" / `other.noPaths.descriptionStandalone`'s
+> "Settings → Model Paths" renderings. No `[TODO: Translate]` placeholder remains.
 
 ---
 
@@ -686,6 +742,41 @@ directly (model-type names, R3). The tooltip quotes the `modals.download.useDefa
 label verbatim with each locale's UI-label quoting style (zh-CN “ ”, zh-TW/ja 「 」,
 ko `' '`, fr « … », de „ … “, es/ru/he «…»).
 
+### Download root rules feature (per-type routing by base model / tag)
+
+The settings Library tab hosts an ordered rule list per model type
+(`settings.downloadRootRules.*`) that sends a download to a non-default root folder when
+the model's base model or tags match; the download modal names the rule that matched
+(`modals.download.routedByRule.*`). Rules are checked in order, the **first match wins**,
+and unmatched downloads fall back to the default root. "Routing" itself reuses the
+Download routing feature row above (zh 路由, ja 振り分け, ko 라우팅, …).
+
+| Term | Rendering |
+|---|---|
+| rule | zh-CN 规则 · zh-TW 規則 · ja ルール · ko 규칙 · fr règle · de Regel · es regla · ru правило · he כלל |
+| root (folder) | reuse each locale's `sidebar.modelRoot` noun: zh-CN 根目录 · zh-TW 根目錄 · ja ルート · ko 루트 · fr racine · de Stammordner · es raíz · ru корневая папка · he שורש |
+| default root | zh-CN 默认根目录 · zh-TW 預設根目錄 · ja デフォルトルート · ko 기본 루트 · fr racine par défaut · de Standard-Stammordner · es raíz predeterminada · ru корневая папка по умолчанию · he שורש ברירת המחדל |
+| first match wins | zh-CN 首个命中的规则生效 · zh-TW 首個命中的規則生效 · ja 最初に一致したルールが適用 · ko 첫 번째로 일치하는 규칙이 적용 · fr la première correspondance l’emporte · de der erste Treffer gewinnt · es gana la primera coincidencia · ru срабатывает первое совпадение · he ההתאמה הראשונה מנצחת |
+| unmatched (downloads) | zh-CN 未匹配 · zh-TW 未匹配 · ja 一致しない · ko 일치하지 않는 · fr sans correspondance · de ohne Treffer · es sin coincidencia · ru без совпадения · he ללא התאמה |
+| routed by rule | zh-CN 已由规则路由 · zh-TW 已由規則路由 · ja ルールで振り分け · ko 규칙에 따라 라우팅됨 · fr routé par règle · de per Regel geroutet · es enrutado por regla · ru маршрут по правилу · he נותב לפי כלל |
+
+- The match-type **chips** are tiny badges: `BM` stays Latin everywhere; the tag chip uses
+  the short tag noun (zh-CN 标签, zh-TW 標籤, ja タグ, ko 태그, fr/de Tag, ru Тег,
+  he תגית). **es uses `Tag` on the chip** (not "etiqueta") because the full noun
+  overflows the badge — the full term "Etiqueta" still appears in the `matchTypes.tag`
+  tooltip.
+- `types.*` are model-type names (R3) and `tagPlaceholder` is an example token list (§6):
+  both stay byte-identical to `en.json` in every locale.
+- `summary.*` are fragments inside the collapsed-row button — no trailing period, ASCII
+  `...` per R7. `summary.more` joins after the first two matches as `a, b, <more>`;
+  `{count}` may move (ru «ещё {count}», ja 「他 {count} 件」, zh-CN 还有 {count} 项,
+  zh-TW 還有 {count} 項).
+- `routedByRule.*` quote the matched value with each locale's UI-label quoting style
+  (zh-CN “ ”, zh-TW/ja 「 」, ko `' '`, fr « … », de „ … “, es/ru/he «…»).
+- Colon style in `defaultHint` / `saveFailed` / `routedByRule` follows each file's
+  existing majority: full-width `：` for zh-CN/zh-TW/ja, ASCII `:` for ko and the
+  Latin/Cyrillic/Hebrew locales (fr keeps its space before `:`).
+
 ### OpenModelDB feature
 
 **OpenModelDB** is a brand name and stays Latin in every locale (R3, same as CivitAI /
@@ -782,6 +873,102 @@ count, `(5/10)`). `{count}` is substituted with an already-formatted number
 files the walk looked at**, not every file on disk — the noun mirrors each locale's
 `stages.count_models` rendering, and `ru` uses the `файл(ов)` form because the count ticks
 live and can be any number (`notEmptyMessageCount` precedent).
+
+### Filter count tooltips (hover text of counted chips / options / rows)
+
+The number shown in a filter-panel chip, an All Types option or a Refresh scope row is
+abbreviated from 10,000 up (above); its tooltip is **always** present and always exact, because
+it also repeats the label that CSS may have ellipsized. Shape: `{name} — {count} <noun>` — the
+two keys differ only in the noun, so a locale's word order for the count (ko `모델 {count}개`)
+is applied once and reused. Dash follows the `sidebar.folderRoot.*Status` precedent: CJK uses
+`——`, all other locales `—`. "models" reuses each locale's `loras.controls.refresh.rootModels`
+noun; "recipes" uses the R4 noun in its plain plural (fr keeps `Recipes`).
+
+| Term | Rendering |
+|---|---|
+| `header.filter.countTitle` ("{name} — {count} models") | zh-CN {name} —— {count} 个模型 · zh-TW {name} —— {count} 個模型 · ja {name} —— {count} 個のモデル · ko {name} —— 모델 {count}개 · fr {name} — {count} modèles · de {name} — {count} Modelle · es {name} — {count} modelos · ru {name} — {count} модел(ей) · he {name} — {count} מודלים |
+| `recipes.filter.countTitle` ("{name} — {count} recipes") | zh-CN {name} —— {count} 个配方 · zh-TW {name} —— {count} 個配方 · ja {name} —— {count} 件のレシピ · ko {name} —— 레시피 {count}개 · fr {name} — {count} Recipes · de {name} — {count} Rezepte · es {name} — {count} recetas · ru {name} — {count} рецепт(ов) · he {name} — {count} מתכונים |
+
+Both keys are passed a pre-formatted count (`formatCountExact`), so no locale adds its own
+digit grouping; `ko` needs no `의` because the count follows the noun directly, as in
+`rootModels`.
+
+### First-run welcome page and fetch-status copy
+
+The first launch gates the library scan behind a welcome page (`firstRun.*`, 30 keys): it lists
+the scanned libraries with their model counts, offers the sidecar-storage choice, and starts or
+defers the initial scan. The same feature series added the initialization failure state
+(`initialization.error.*`), the bulk metadata fetch's rate-limit copy
+(`modals.metadataFetchSummary.rateLimitedNotice`, `toast.api.metadataFetchRateLimited`), the
+post-scan banner prompting the first fetch (`banners.bulkFetchPrompt.*`), the two download-modal
+link errors (`modals.download.errors.linkedFile*`) and the duplicate-delete follow-ups
+(`toast.duplicates.deletePartialFailed` / `.cacheUpdateFailed`).
+
+Most of these strings are assembled from existing renderings rather than new terms:
+
+| Term | Rendering |
+|---|---|
+| "Welcome to LoRA Manager" (`firstRun.title`) | byte-identical to `onboarding.languageSelection.title` in every locale |
+| `firstRun.libraries.*` | the model-type names of `header.navigation.*` — zh-CN/zh-TW/ja/ko keep the **singular** `LoRA` / `Checkpoint` / `Embedding`, the Latin locales keep the plurals; `other` uses the "Other Models" `other.title` rendering |
+| `firstRun.libraryStats` ("{count} models · {size}") | the "models" count shape of `loras.controls.refresh.rootModels` (ko `모델 {count}개`, ru `{count} модел(ей)`); the middle-dot separator stays verbatim |
+| `estimate` scan time (`~{minutes} min`) | the `common.scanProgress.eta.minutes` abbreviation (de `Min.`, fr `min`, ru `мин`) |
+| "recommended" | zh-CN 推荐 · zh-TW 建議 · ja 推奨 · ko 권장 · fr recommandé · de empfohlen · es recomendado · ru рекомендуется · he מומלץ |
+| `rootMissing` ("Directory not found") | the `recipes.batchImport.directory` noun (zh-CN 目录 · zh-TW 目錄 · ja フォルダ · ko 폴더 · fr dossier · de Verzeichnis · es directorio · ru папка · he תיקייה) with the `sidebar.deleteFolderModal.missingTitle` "not found" shape |
+| directory (of the centralized sidecar path) | zh-CN 目录 · zh-TW 目錄 · ja ディレクトリ · ko 디렉터리 · fr dossier · de Verzeichnis · es directorio · ru каталог · he תיקייה |
+| metadata storage | zh-CN 元数据存储 · zh-TW 中繼資料儲存 · ja メタデータの保存 · ko 메타데이터 저장 · fr Stockage des métadonnées · de Metadaten-Speicherung · es Almacenamiento de metadatos · ru Хранение метаданных · he אחסון מטא-נתונים |
+| rate limit (of the metadata provider) | zh-CN 速率限制 · zh-TW 速率限制 · ja レート制限 · ko 속도 제한 · fr limite de débit · de Ratenlimit · es límite de solicitudes · ru лимит запросов · he מגבלת קצב |
+| "(Deprecated)" (`settings.folderSettings.activeLibrary`) | zh-CN 已弃用 · zh-TW 已棄用 · ja 非推奨 · ko 사용 중단 예정 · fr obsolète · de veraltet · es obsoleto · ru устарело · he מיושן |
+| bulk-fetch banner title | zh-CN 让你的模型库焕发生机 · zh-TW 讓您的模型庫煥發生機 · ja ライブラリに命を吹き込もう · ko 라이브러리에 생기를 불어넣으세요 · fr Donnez vie à votre bibliothèque · de Erwecken Sie Ihre Bibliothek zum Leben · es Dale vida a tu biblioteca · ru Вдохните жизнь в свою библиотеку · he החייה את הספרייה שלך |
+| defer ("Later") / banner ("Maybe Later") | zh-CN 稍后 / 以后再说 · zh-TW 稍後 / 稍後再說 · ja 後で / また今度 · ko 나중에 / 나중에 하기 · fr Plus tard / Peut-être plus tard · de Später / Vielleicht später · es Más tarde / Quizás más tarde · ru Позже / Может быть, позже · he מאוחר יותר / אולי מאוחר יותר |
+
+- The two rate-limit strings name the **Fetch** action in prose. Where `en` quotes it
+  (`Re-run "Fetch from Civitai"`), the locale quotes its own `loras.controls.fetch.title`
+  value verbatim with its UI-label quoting style (zh-CN “ ”, zh-TW/ja 「 」, ko `' '`,
+  fr « … », de „ … “, es/ru/he «…») — zh-TW therefore quotes its existing
+  「從 CivitAI 取得 metadata」 label rather than inventing a second rendering of it.
+  `toast.duplicates.cacheUpdateFailed` quotes `loras.controls.refresh.full` the same way.
+- `toast.api.metadataFetchRateLimited` keeps the en "updated {success} of {total}" clause in
+  each locale's own "N of M" shape; `toast.duplicates.deletePartialFailed` mirrors
+  `toast.duplicates.deleteFailed` with the `{failed}` count inserted before the `{type}` noun
+  (ko puts the count after it, ja puts the count on the selected items).
+- `firstRun.description`, `.sidecar.alongside.description` and `.centralized.description`
+  name the sidecar files, so they use the Sidecar storage row's "sidecar" and "alongside model
+  files" renderings plus the §5 "metadata" noun; the `.json` file suffix stays byte-identical.
+  `firstRun.sidecar.*` is the same choice as `settings.sidecarStorage.modeOptions.*` made
+  before the first scan, so the labels reuse those renderings and only the parenthetical
+  changes (`(recommended)` instead of `(default)` / "centralized storage").
+- `firstRun.language.label` reuses `common.language.select` (zh-CN keeps its 选择语言 verb
+  label rather than introducing a second rendering of "Language").
+
+### Workflows feature (page, folders, restore/update actions)
+
+The Workflows page (`workflows.*`) lists the ComfyUI workflow JSON files kept in their own
+library folders. **Workflow** is the §5 term per locale and never becomes a different noun;
+"workflow management" is the feature name, built from that noun plus the locale's management
+word (`Verwaltung` / `gestion` / `gestión` / `управление` / `ניהול`).
+
+| Term | Rendering |
+|---|---|
+| Workflows (page title / nav) | zh-CN 工作流 · zh-TW 工作流 · ja ワークフロー · ko 워크플로 · fr/de/es/ru/he Workflows |
+| workflow (noun in prose) | zh-CN 工作流 · zh-TW 工作流 · ja ワークフロー · ko 워크플로 · fr workflow · de Workflow · es workflow · ru workflow · he workflow |
+| Workflow Management (settings toggle) | zh-CN 工作流管理 · zh-TW 工作流管理 · ja ワークフロー管理 · ko 워크플로 관리 · fr Gestion des workflows · de Workflow-Verwaltung · es Gestión de workflows · ru Управление workflow · he ניהול workflow |
+| Workflow Folders / Workflow Paths | zh-CN 工作流文件夹 / 工作流路径 · zh-TW 工作流資料夾 / 工作流路徑 · ja ワークフローフォルダー / ワークフローパス · ko 워크플로 폴더 / 워크플로 경로 · fr Dossiers de workflows / Chemins de workflows · de Workflow-Ordner / Workflow-Pfade · es Carpetas de workflows / Rutas de workflows · ru Папки workflow / Пути workflow · he תיקיות workflow / נתיבי workflow |
+| Open in ComfyUI (card action and context menu) | zh-CN 在 ComfyUI 中打开 · zh-TW 在 ComfyUI 中開啟 · ja ComfyUIで開く · ko ComfyUI에서 열기 · fr Ouvrir dans ComfyUI · de In ComfyUI öffnen · es Abrir en ComfyUI · ru Открыть в ComfyUI · he פתח ב-ComfyUI |
+| Update from ComfyUI | zh-CN 从 ComfyUI 更新 · zh-TW 從 ComfyUI 更新 · ja ComfyUIから更新 · ko ComfyUI에서 업데이트 · fr Mettre à jour depuis ComfyUI · de Von ComfyUI aktualisieren · es Actualizar desde ComfyUI · ru Обновить из ComfyUI · he עדכן מ-ComfyUI |
+| Restore Downloaded Version | zh-CN 恢复已下载版本 · zh-TW 還原已下載版本 · ja ダウンロード済みバージョンを復元 · ko 다운로드한 버전 복원 · fr Restaurer la version téléchargée · de Heruntergeladene Version wiederherstellen · es Restaurar versión descargada · ru Восстановить загруженную версию · he שחזר את הגרסה שהורדה |
+
+- "CivitAI Workflow resources" keeps `Workflow` in Latin even in the CJK locales: it names
+  CivitAI's resource type (the §2 "Other Models" rule for model-type names), not this page.
+- `folder_paths.workflows` is a JSON key and stays byte-identical in every locale.
+- `noPaths.descriptionStandalone` keeps the standalone split — **Settings → Model Paths** plus
+  a restart — while `.descriptionComfyUI` points at **Settings → Library** and a page reload;
+  both reuse the nav-path renderings of `other.noPaths.*` / `other.disabled.hint`.
+- `disabled.*` mirrors `other.disabled.*` sentence by sentence ("management is off", "Enable it
+  to …", "Failed to enable …"), and `noPaths.*` mirrors `other.noPaths.*` — including the three
+  `open*` buttons, which are byte-identical to their `other.noPaths.open*` twins.
+- Failure toasts carry `{message}` verbatim. CJK uses the full-width colon (`：`); ko and the
+  Latin/Cyrillic/Hebrew locales use ASCII (fr with its space, ` : `). The `restoring` loading
+  line follows each locale's existing "… in progress" shape (`recipesPathMigrating`).
 
 ---
 

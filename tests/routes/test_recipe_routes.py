@@ -758,6 +758,31 @@ async def test_list_recipes_ignores_invalid_lora_availability_values(
         assert "lora_availability" not in filters
 
 
+async def test_list_recipes_passes_has_workflow_filter(
+    monkeypatch, tmp_path: Path
+) -> None:
+    async with recipe_harness(monkeypatch, tmp_path) as harness:
+        response = await harness.client.get("/api/lm/recipes?has_workflow=true")
+        payload = await response.json()
+
+        assert response.status == 200
+        assert payload["items"] == []
+        assert harness.scanner.last_paginated_params is not None
+        filters = harness.scanner.last_paginated_params["filters"]
+        assert filters["has_workflow"] is True
+
+
+async def test_list_recipes_ignores_non_true_has_workflow(
+    monkeypatch, tmp_path: Path
+) -> None:
+    async with recipe_harness(monkeypatch, tmp_path) as harness:
+        response = await harness.client.get("/api/lm/recipes?has_workflow=bogus")
+        assert response.status == 200
+        assert harness.scanner.last_paginated_params is not None
+        filters = harness.scanner.last_paginated_params["filters"]
+        assert "has_workflow" not in filters
+
+
 async def test_get_recipes_for_checkpoint(monkeypatch, tmp_path: Path) -> None:
     async with recipe_harness(monkeypatch, tmp_path) as harness:
         harness.scanner.checkpoint_lookup["abc123"] = [
@@ -2476,6 +2501,156 @@ async def test_get_recipe_detail_includes_recipe_json_path(
         assert response.status == 200
         payload = await response.json()
         assert "recipe_json_path" not in payload
+
+
+def test_strip_trailing_ellipsis_helper() -> None:
+    """The repair helper only removes trailing ``...`` runs."""
+    handler = recipe_handlers.RecipeListingHandler
+
+    assert handler._strip_trailing_ellipsis("a cat...") == "a cat"
+    assert handler._strip_trailing_ellipsis("a cat...   ") == "a cat"
+    assert handler._strip_trailing_ellipsis("a cat......") == "a cat"
+    assert handler._strip_trailing_ellipsis("...") == ""
+    assert handler._strip_trailing_ellipsis("a cat..") is None
+    assert handler._strip_trailing_ellipsis("a cat") is None
+    assert handler._strip_trailing_ellipsis("a cat\u2026") is None
+    assert handler._strip_trailing_ellipsis(None) is None
+
+
+async def test_get_recipe_repairs_legacy_trailing_prompt_ellipsis(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Loading a recipe detail strips the legacy trailing ``...`` and persists it."""
+    async with recipe_harness(monkeypatch, tmp_path) as harness:
+        recipes_dir = Path(harness.scanner.recipes_dir)
+        recipes_dir.mkdir(parents=True, exist_ok=True)
+        recipe_id = "recipe-ellipsis"
+        recipe = {
+            "id": recipe_id,
+            "title": "Legacy",
+            "file_path": str(recipes_dir / f"{recipe_id}.png"),
+            "gen_params": {
+                "prompt": "a cat...",
+                "negative_prompt": "blurry......",
+                "steps": 20,
+            },
+        }
+        harness.scanner.recipes[recipe_id] = recipe
+        (recipes_dir / f"{recipe_id}.recipe.json").write_text(
+            json.dumps(recipe), encoding="utf-8"
+        )
+
+        update_calls: List[tuple[str, Dict[str, Any]]] = []
+
+        async def fake_update_recipe_metadata(
+            target_id: str, metadata: Dict[str, Any]
+        ) -> bool:
+            update_calls.append((target_id, metadata))
+            return True
+
+        monkeypatch.setattr(
+            harness.scanner,
+            "update_recipe_metadata",
+            fake_update_recipe_metadata,
+            raising=False,
+        )
+
+        response = await harness.client.get(f"/api/lm/recipe/{recipe_id}")
+        assert response.status == 200
+        payload = await response.json()
+
+        assert payload["gen_params"] == {
+            "prompt": "a cat",
+            "negative_prompt": "blurry",
+            "steps": 20,
+        }
+        assert update_calls == [
+            (
+                recipe_id,
+                {
+                    "gen_params": {
+                        "prompt": "a cat",
+                        "negative_prompt": "blurry",
+                        "steps": 20,
+                    }
+                },
+            )
+        ]
+
+
+async def test_get_recipe_keeps_prompts_without_legacy_ellipsis(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Prompts that do not end with ``...`` are returned untouched."""
+    async with recipe_harness(monkeypatch, tmp_path) as harness:
+        recipes_dir = Path(harness.scanner.recipes_dir)
+        recipes_dir.mkdir(parents=True, exist_ok=True)
+        recipe_id = "recipe-clean"
+        gen_params = {
+            "prompt": "a cat..",
+            "negative_prompt": "blurry.",
+            "steps": 20,
+        }
+        harness.scanner.recipes[recipe_id] = {
+            "id": recipe_id,
+            "title": "Clean",
+            "file_path": str(recipes_dir / f"{recipe_id}.png"),
+            "gen_params": dict(gen_params),
+        }
+
+        update_calls: List[Any] = []
+
+        async def record_update(*args: Any, **kwargs: Any) -> bool:
+            update_calls.append((args, kwargs))
+            return True
+
+        monkeypatch.setattr(
+            harness.scanner,
+            "update_recipe_metadata",
+            record_update,
+            raising=False,
+        )
+
+        response = await harness.client.get(f"/api/lm/recipe/{recipe_id}")
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["gen_params"] == gen_params
+        assert update_calls == []
+
+
+async def test_get_recipe_returns_stored_prompt_when_repair_persist_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A failed repair write falls back to the stored value instead of masking it."""
+    async with recipe_harness(monkeypatch, tmp_path) as harness:
+        recipes_dir = Path(harness.scanner.recipes_dir)
+        recipes_dir.mkdir(parents=True, exist_ok=True)
+        recipe_id = "recipe-failed-repair"
+        harness.scanner.recipes[recipe_id] = {
+            "id": recipe_id,
+            "title": "Legacy",
+            "file_path": str(recipes_dir / f"{recipe_id}.png"),
+            "gen_params": {"prompt": "a cat...", "steps": 20},
+        }
+
+        update_calls: List[Any] = []
+
+        async def failing_update(*args: Any, **kwargs: Any) -> bool:
+            update_calls.append((args, kwargs))
+            return False
+
+        monkeypatch.setattr(
+            harness.scanner,
+            "update_recipe_metadata",
+            failing_update,
+            raising=False,
+        )
+
+        response = await harness.client.get(f"/api/lm/recipe/{recipe_id}")
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["gen_params"]["prompt"] == "a cat..."
+        assert len(update_calls) == 1
 
 
 async def test_reimport_with_extension_payload_uses_payload_path(

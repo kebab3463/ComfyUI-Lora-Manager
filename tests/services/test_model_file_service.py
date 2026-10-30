@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import List
 
@@ -359,7 +360,9 @@ async def test_delete_folder_success_manifest_carries_excluded_model_count(tmp_p
 @pytest.mark.asyncio
 async def test_delete_folder_refuses_while_a_staged_delete_is_pending(tmp_path: Path):
     target = _make_nested(tmp_path)
-    (target / ".lm-pending-delete").mkdir()
+    batch = target / ".lm-pending-delete" / "batch1"
+    batch.mkdir(parents=True)
+    (batch / "manifest.json").write_text("{}", encoding="utf-8")
     scanner = FakeScanner([tmp_path])
     service = ModelMoveService(scanner, "lora")
 
@@ -368,6 +371,43 @@ async def test_delete_folder_refuses_while_a_staged_delete_is_pending(tmp_path: 
     assert result["success"] is False
     assert result["code"] == "busy"
     assert target.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_folder_ignores_an_empty_staging_container(tmp_path: Path):
+    """An empty `.lm-pending-delete` is a leftover, not a pending deletion.
+
+    Every purge, undo and failed staging used to leave the container behind, and
+    the name match alone made the folder undeletable for good: "A deletion is
+    still pending inside this folder. Wait for the undo window to expire." with
+    no window left to wait for (issue #1145 follow-up).
+    """
+    target = _make_nested(tmp_path)
+    (target / ".lm-pending-delete").mkdir()
+    scanner = FakeScanner([tmp_path])
+    service = ModelMoveService(scanner, "lora")
+
+    result = await service.delete_folder(str(target))
+
+    assert result["success"] is True
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_folder_refuses_over_a_quarantined_batch(tmp_path: Path):
+    """Quarantine preserves the user's staged files, so it still blocks."""
+    target = _make_nested(tmp_path)
+    quarantined = target / ".lm-pending-delete" / "batch1.orphaned"
+    quarantined.mkdir(parents=True)
+    (quarantined / "model.safetensors").write_bytes(b"user-data")
+    scanner = FakeScanner([tmp_path])
+    service = ModelMoveService(scanner, "lora")
+
+    result = await service.delete_folder(str(target))
+
+    assert result["success"] is False
+    assert result["code"] == "busy"
+    assert (quarantined / "model.safetensors").read_bytes() == b"user-data"
 
 
 @pytest.mark.asyncio
@@ -400,14 +440,74 @@ async def test_delete_folder_rejects_paths_outside_roots(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_delete_folder_reports_missing_directory(tmp_path: Path):
+async def test_delete_folder_forgets_a_directory_that_is_already_gone(tmp_path: Path):
+    """There is nothing to delete, but the sidebar node can still be cleared.
+
+    A folder moved with a file manager leaves its records behind; answering
+    "Folder no longer exists" left the ghost with no way out of the UI (#1145).
+    """
+    scanner = FakeScanner([tmp_path])
+    service = ModelMoveService(scanner, "lora")
+    gone = tmp_path / "gone"
+
+    result = await service.delete_folder(str(gone))
+
+    assert result["success"] is True
+    assert result["code"] == "missing"
+    assert result["already_missing"] is True
+    assert result["folder"] == "gone"
+    assert scanner.removed_folders == ["gone"]
+    assert scanner.removed_folder_paths == [str(gone)]
+
+
+@pytest.mark.asyncio
+async def test_delete_folder_dry_run_still_reports_a_missing_directory(tmp_path: Path):
+    """The probe stays a pure read — it is what makes the dialog offer the removal."""
     scanner = FakeScanner([tmp_path])
     service = ModelMoveService(scanner, "lora")
 
-    result = await service.delete_folder(str(tmp_path / "gone"))
+    result = await service.delete_folder(str(tmp_path / "gone"), dry_run=True)
 
     assert result["success"] is False
-    assert "no longer exists" in result["error"]
+    assert result["code"] == "missing"
+    assert scanner.removed_folders == []
+
+
+@pytest.mark.asyncio
+async def test_forget_folder_drops_the_records_of_a_gone_directory(tmp_path: Path):
+    scanner = FakeScanner([tmp_path])
+    service = ModelMoveService(scanner, "lora")
+
+    result = await service.forget_folder("Krea2/Women")
+
+    assert result["success"] is True
+    assert result["folder"] == "Krea2/Women"
+    # No absolute path: the same relative folder may exist under several roots,
+    # and the scanner keeps an entry another root still holds.
+    assert scanner.removed_folders == ["Krea2/Women"]
+    assert scanner.removed_folder_paths == [None]
+
+
+@pytest.mark.asyncio
+async def test_forget_folder_refuses_while_the_directory_still_exists(tmp_path: Path):
+    """Then the caller wants a delete, not a cleanup."""
+    (tmp_path / "Krea2" / "Women").mkdir(parents=True)
+    scanner = FakeScanner([tmp_path])
+    service = ModelMoveService(scanner, "lora")
+
+    result = await service.forget_folder("Krea2/Women")
+
+    assert result["success"] is False
+    assert result["code"] == "exists"
+    assert scanner.removed_folders == []
+
+
+@pytest.mark.asyncio
+async def test_forget_folder_requires_a_folder(tmp_path: Path):
+    service = ModelMoveService(FakeScanner([tmp_path]), "lora")
+
+    assert (await service.forget_folder(""))["success"] is False
+    assert (await service.forget_folder("../outside"))["success"] is False
 
 
 @pytest.mark.asyncio
@@ -609,7 +709,9 @@ async def test_rename_folder_refuses_symlinked_directory(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_rename_folder_refuses_while_a_staged_delete_is_pending(tmp_path: Path):
     target = _make_nested(tmp_path)
-    (target / ".lm-pending-delete").mkdir()
+    batch = target / ".lm-pending-delete" / "batch1"
+    batch.mkdir(parents=True)
+    (batch / "manifest.json").write_text("{}", encoding="utf-8")
     scanner = FakeScanner([tmp_path])
     service = ModelMoveService(scanner, "lora")
 
@@ -619,6 +721,20 @@ async def test_rename_folder_refuses_while_a_staged_delete_is_pending(tmp_path: 
     assert result["code"] == "busy"
     assert target.is_dir()
     assert scanner.renamed_folders == []
+
+
+@pytest.mark.asyncio
+async def test_rename_folder_ignores_an_empty_staging_container(tmp_path: Path):
+    """The leftover container must not block a rename either."""
+    target = _make_nested(tmp_path)
+    (target / ".lm-pending-delete").mkdir()
+    scanner = FakeScanner([tmp_path])
+    service = ModelMoveService(scanner, "lora")
+
+    result = await service.rename_folder(str(target), "animation")
+
+    assert result["success"] is True
+    assert scanner.renamed_folders
 
 
 @pytest.mark.asyncio
@@ -711,3 +827,81 @@ async def test_rename_folder_refuses_the_recipes_dir(tmp_path: Path, monkeypatch
     assert result["code"] == "protected"
     assert target.is_dir()
     assert scanner.renamed_folders == []
+
+
+class AutoOrganizeScanner:
+    """Minimal scanner stand-in for auto-organize path-budget tests."""
+
+    def __init__(self, root: Path, models: List[dict]) -> None:
+        self._root = str(root)
+        from types import SimpleNamespace
+
+        self._cache = SimpleNamespace(raw_data=models)
+        self.moves: List[tuple] = []
+
+    def get_model_roots(self) -> List[str]:
+        return [self._root]
+
+    def reset_cancellation(self) -> None:
+        pass
+
+    def is_cancelled(self) -> bool:
+        return False
+
+    async def get_cached_data(self):
+        return self._cache
+
+    async def move_model(self, file_path: str, target_dir: str) -> bool:
+        self.moves.append((file_path, target_dir))
+        return True
+
+
+def _organize_setup(tmp_path: Path):
+    from py.services.model_file_service import ModelFileService
+    from py.services.settings_manager import get_settings_manager
+
+    manager = get_settings_manager()
+    templates = dict(manager.settings.get("download_path_templates") or {})
+    templates["lora"] = "{base_model}"
+    manager.settings["download_path_templates"] = templates
+
+    model_path = tmp_path / "mymodel.safetensors"
+    model_path.write_bytes(b"model")
+    models = [
+        {
+            "file_path": model_path.as_posix(),
+            "model_name": "mymodel",
+            "base_model": "SDXL",
+            "tags": [],
+            "civitai": {"id": 1},
+        }
+    ]
+    scanner = AutoOrganizeScanner(tmp_path, models)
+    return ModelFileService(scanner, "lora"), scanner, model_path
+
+
+@pytest.mark.asyncio
+async def test_auto_organize_moves_model_within_path_budget(tmp_path: Path):
+    service, scanner, model_path = _organize_setup(tmp_path)
+
+    result = await service.auto_organize_models()
+
+    assert result.success_count == 1
+    assert scanner.moves == [
+        (model_path.as_posix(), str(tmp_path / "SDXL").replace(os.sep, "/"))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_auto_organize_skips_model_when_target_path_exceeds_budget(
+    tmp_path: Path, monkeypatch
+):
+    """Organize cannot trim names, so an over-long target is skipped (#1142)."""
+    monkeypatch.setattr("py.utils.utils.MAX_FULL_PATH_LENGTH", 40)
+    service, scanner, _model_path = _organize_setup(tmp_path)
+
+    result = await service.auto_organize_models()
+
+    assert result.skipped_count == 1
+    assert scanner.moves == []
+    assert "path length limit" in result.results[0]["message"]

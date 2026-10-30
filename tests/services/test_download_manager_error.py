@@ -532,7 +532,7 @@ async def test_execute_download_extracts_zip_single_model(monkeypatch, tmp_path)
     extracted = save_dir / "model.safetensors"
     assert extracted.exists()
     saved_call = MetadataManager.save_metadata.await_args
-    assert saved_call.args[0] == str(extracted)
+    assert saved_call.args[0] == str(extracted).replace(os.sep, "/")
     # SHA256 comes from metadata (API value), not recalculated
     assert saved_call.args[1].sha256 == "sha256"
     # The zip-level AutoV3 was cleared; the extracted file is not safetensors,
@@ -617,10 +617,10 @@ async def test_execute_download_extracts_zip_multiple_models(monkeypatch, tmp_pa
     assert dummy_scanner.add_model_to_cache.await_count == 2
 
     metadata_calls = MetadataManager.save_metadata.await_args_list
-    assert metadata_calls[0].args[0] == str(extracted_one)
+    assert metadata_calls[0].args[0] == str(extracted_one).replace(os.sep, "/")
     # SHA256 comes from metadata (API value), not recalculated
     assert metadata_calls[0].args[1].sha256 == "sha256"
-    assert metadata_calls[1].args[0] == str(extracted_two)
+    assert metadata_calls[1].args[0] == str(extracted_two).replace(os.sep, "/")
     assert metadata_calls[1].args[1].sha256 == "sha256"
 
 
@@ -693,7 +693,7 @@ async def test_execute_download_extracts_zip_pt_embedding(monkeypatch, tmp_path)
     extracted = save_dir / "embedding.pt"
     assert extracted.exists()
     saved_call = MetadataManager.save_metadata.await_args
-    assert saved_call.args[0] == str(extracted)
+    assert saved_call.args[0] == str(extracted).replace(os.sep, "/")
     # SHA256 comes from metadata (API value), not recalculated
     assert saved_call.args[1].sha256 == "sha256"
     assert dummy_scanner.add_model_to_cache.await_count == 1
@@ -727,6 +727,37 @@ async def test_extract_model_files_from_archive_uses_executor(monkeypatch, tmp_p
     assert captured["executor"] is manager._archive_executor
     assert len(extracted) == 1
     assert extracted[0].endswith("model.safetensors")
+
+
+@pytest.mark.asyncio
+async def test_extract_model_files_from_archive_fits_member_names_to_path_budget(
+    tmp_path,
+):
+    """Archive member names carry no length cap: a CJK-heavy member whose
+    stem passes every character cap still overflows NAME_MAX in bytes and
+    must be truncated, or the create fails with ENAMETOOLONG."""
+    from py.utils.constants import (
+        MAX_FILENAME_COMPONENT_BYTES,
+        PATH_BUDGET_SUFFIX_ALLOWANCE,
+    )
+
+    manager = DownloadManager()
+    archive_path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("界" * 100 + ".safetensors", b"model")
+
+    extracted = await manager._extract_model_files_from_archive(
+        str(archive_path),
+        {".safetensors"},
+    )
+
+    assert len(extracted) == 1
+    member_stem = os.path.splitext(os.path.basename(extracted[0]))[0]
+    assert (
+        len(member_stem.encode("utf-8")) + PATH_BUDGET_SUFFIX_ALLOWANCE
+        <= MAX_FILENAME_COMPONENT_BYTES
+    )
+    assert os.path.exists(extracted[0])
 
 
 @pytest.mark.asyncio
@@ -1969,7 +2000,7 @@ def _prepare_tracked_download(manager, download_id, status="downloading"):
     manager._pause_events[download_id] = DownloadStreamControl()
 
 
-async def _run_download(manager, download_id, tmp_path):
+async def _run_download(manager, download_id, tmp_path, source=None):
     return await manager._download_with_semaphore(
         download_id,
         1,
@@ -1978,7 +2009,7 @@ async def _run_download(manager, download_id, tmp_path):
         "",
         None,
         False,
-        None,
+        source,
         None,
         False,
     )
@@ -2061,6 +2092,116 @@ async def test_preflight_gate_blocks_when_host_in_cooldown(
     # The concurrency slot was never occupied by the gated download.
     await asyncio.wait_for(manager._download_semaphore.acquire(), timeout=0.1)
     manager._download_semaphore.release()
+
+
+@pytest.mark.asyncio
+async def test_preflight_gate_ignores_civarchive_cooldown_for_civitai_downloads(
+    monkeypatch, tmp_path, queue_service, reset_rate_limit_coordinator
+):
+    """A civarchive.com cooldown (armed e.g. by bulk metadata fetches) must
+    not block a plain CivitAI download that never touches that host."""
+    manager = DownloadManager()
+    monkeypatch.setattr(manager, "_cleanup_download_record", AsyncMock())
+
+    coordinator = await RateLimitCoordinator.get_instance()
+    coordinator.register_rate_limit("civarchive.com", 1800)
+
+    download_id = "dl-civarchive-cooldown"
+    await queue_service.add_to_queue(download_id=download_id, model_id=1)
+    _prepare_tracked_download(manager, download_id, status="waiting")
+
+    execute = AsyncMock(return_value={"success": True})
+    monkeypatch.setattr(manager, "_execute_original_download", execute)
+
+    result = await _run_download(manager, download_id, tmp_path)
+
+    assert execute.await_count == 1
+    assert result["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_preflight_gate_ignores_civarchive_cooldown_for_civarchive_source(
+    monkeypatch, tmp_path, queue_service, reset_rate_limit_coordinator
+):
+    """A civarchive.com cooldown must not hard-block CivArchive-sourced
+    downloads either: they can still resolve metadata and file bytes from
+    CivitAI. The CivArchive legs are gated separately (metadata via
+    wait_for_slot, mirrors via _deprioritize_cooled_down_urls)."""
+    manager = DownloadManager()
+    monkeypatch.setattr(manager, "_cleanup_download_record", AsyncMock())
+
+    coordinator = await RateLimitCoordinator.get_instance()
+    coordinator.register_rate_limit("civarchive.com", 1800)
+
+    download_id = "dl-civarchive-source"
+    await queue_service.add_to_queue(download_id=download_id, model_id=1)
+    _prepare_tracked_download(manager, download_id, status="waiting")
+
+    execute = AsyncMock(return_value={"success": True})
+    monkeypatch.setattr(manager, "_execute_original_download", execute)
+
+    result = await _run_download(manager, download_id, tmp_path, source="civarchive")
+
+    assert execute.await_count == 1
+    assert result["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_deprioritize_cooled_down_urls_moves_cooled_hosts_last(
+    reset_rate_limit_coordinator,
+):
+    """Mirrors on a cooled-down host yield to mirrors that can serve now."""
+    manager = DownloadManager()
+    coordinator = await RateLimitCoordinator.get_instance()
+    coordinator.register_rate_limit("civarchive.com", 1800)
+
+    urls = [
+        "https://civarchive.com/api/download/models/1",
+        "https://civitai.com/api/download/models/1",
+        "https://civarchive.com/mirror/file.safetensors",
+    ]
+
+    reordered = await manager._deprioritize_cooled_down_urls(urls)
+
+    assert reordered == [
+        "https://civitai.com/api/download/models/1",
+        "https://civarchive.com/api/download/models/1",
+        "https://civarchive.com/mirror/file.safetensors",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deprioritize_cooled_down_urls_keeps_order_when_all_cooled(
+    reset_rate_limit_coordinator,
+):
+    """When every mirror is cooling down, order stays unchanged so the
+    transfer's own rate-limit handling (wait within cap, else re-queue)
+    applies to the same first choice as before."""
+    manager = DownloadManager()
+    coordinator = await RateLimitCoordinator.get_instance()
+    coordinator.register_rate_limit("civarchive.com", 1800)
+    coordinator.register_rate_limit("civitai.com", 300)
+
+    urls = [
+        "https://civarchive.com/api/download/models/1",
+        "https://civitai.com/api/download/models/1",
+    ]
+
+    assert await manager._deprioritize_cooled_down_urls(urls) == urls
+
+
+@pytest.mark.asyncio
+async def test_deprioritize_cooled_down_urls_noop_without_cooldown(
+    reset_rate_limit_coordinator,
+):
+    manager = DownloadManager()
+
+    urls = [
+        "https://civarchive.com/api/download/models/1",
+        "https://civitai.com/api/download/models/1",
+    ]
+
+    assert await manager._deprioritize_cooled_down_urls(urls) == urls
 
 
 @pytest.mark.asyncio

@@ -42,12 +42,12 @@ const CSS = `
 }
 #${PANEL_ID} .nvme-row {
     pointer-events: auto;
-    background: rgba(24, 26, 32, 0.96);
-    color: #e8eaed;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: var(--lm-surface-raised, rgba(24, 26, 32, 0.96));
+    color: var(--lm-fg, #e8eaed);
+    border: 1px solid var(--lm-border, rgba(255, 255, 255, 0.12));
     border-radius: 8px;
     padding: 9px 11px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--lm-shadow-lg, 0 4px 16px rgba(0, 0, 0, 0.4));
     animation: nvme-row-in 0.18s ease-out;
 }
 @keyframes nvme-row-in {
@@ -81,13 +81,13 @@ const CSS = `
 #${PANEL_ID} .nvme-bar {
     height: 4px;
     border-radius: 2px;
-    background: rgba(255, 255, 255, 0.14);
+    background: var(--lm-accent-track, rgba(255, 255, 255, 0.14));
     overflow: hidden;
 }
 #${PANEL_ID} .nvme-bar > div {
     height: 100%;
     width: 0;
-    background: #4f9cf9;
+    background: var(--lm-accent, #4f9cf9);
     border-radius: 2px;
     transition: width 0.3s ease;
 }
@@ -99,8 +99,8 @@ const CSS = `
     0%   { margin-left: -35%; }
     100% { margin-left: 100%; }
 }
-#${PANEL_ID} .nvme-row.nvme-done .nvme-bar > div { width: 100%; background: #4caf7d; }
-#${PANEL_ID} .nvme-row.nvme-error .nvme-bar > div { width: 100%; background: #e5534b; }
+#${PANEL_ID} .nvme-row.nvme-done .nvme-bar > div { width: 100%; background: var(--lm-ok, #4caf7d); }
+#${PANEL_ID} .nvme-row.nvme-error .nvme-bar > div { width: 100%; background: var(--lm-danger, #e5534b); }
 #${PANEL_ID} .nvme-meta {
     display: flex;
     justify-content: space-between;
